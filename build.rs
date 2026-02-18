@@ -17,6 +17,8 @@ extern crate napi_build;
 fn main() {
     napi_build::setup();
 
+    let target = std::env::var("TARGET").unwrap_or_default();
+
     // Compile v8_helpers.cpp — direct V8 bulk object creation
     let node_include = node_include_dir();
     let mut build = cc::Build::new();
@@ -25,7 +27,6 @@ fn main() {
         .file("src/v8_helpers.cpp")
         .include(&node_include);
 
-    let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("msvc") {
         // MSVC flags
         build.flag("/std:c++20").flag("/EHs-").flag("/GR-");
@@ -40,6 +41,52 @@ fn main() {
     }
 
     build.compile("v8_helpers");
+
+    // On Windows, link against node.lib for V8 symbols.
+    // On Unix, V8 symbols resolve at runtime when Node.js loads the .node addon.
+    if target.contains("windows") {
+        link_node_lib(&node_include);
+    }
+}
+
+/// Link against node.lib on Windows.
+///
+/// Searches for node.lib in:
+/// 1. node-gyp cache: <version_dir>/<arch>/node.lib
+/// 2. Node.js install directory (next to node.exe)
+fn link_node_lib(include_dir: &str) {
+    let include_path = std::path::Path::new(include_dir);
+
+    // node-gyp cache layout: .../Cache/<version>/include/node/
+    // node.lib is at:         .../Cache/<version>/x64/node.lib
+    if let Some(version_dir) = include_path.parent().and_then(|p| p.parent()) {
+        for arch in &["x64", "arm64", "x86"] {
+            let lib_dir = version_dir.join(arch);
+            if lib_dir.join("node.lib").exists() {
+                println!("cargo:rustc-link-search={}", lib_dir.display());
+                println!("cargo:rustc-link-lib=node");
+                return;
+            }
+        }
+    }
+
+    // Fallback: node.lib next to node.exe
+    let output = std::process::Command::new("node")
+        .args(["-e", "console.log(require('path').dirname(process.execPath))"])
+        .output()
+        .ok();
+    if let Some(out) = output {
+        if let Ok(dir) = String::from_utf8(out.stdout) {
+            let dir = dir.trim();
+            if std::path::Path::new(dir).join("node.lib").exists() {
+                println!("cargo:rustc-link-search={dir}");
+                println!("cargo:rustc-link-lib=node");
+                return;
+            }
+        }
+    }
+
+    panic!("node.lib not found. Required for Windows builds. Run: npx node-gyp install");
 }
 
 /// Get Node.js include directory for V8 headers.
