@@ -19,44 +19,84 @@ fn main() {
 
     // Compile v8_helpers.cpp — direct V8 bulk object creation
     let node_include = node_include_dir();
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    build
         .cpp(true)
         .file("src/v8_helpers.cpp")
-        .include(&node_include)
-        .flag("-std=c++20")
-        .flag("-fno-exceptions")
-        .flag("-fno-rtti")
-        .flag("-Wno-unused-parameter")
-        .flag("-O2")
-        .compile("v8_helpers");
+        .include(&node_include);
+
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.contains("msvc") {
+        // MSVC flags
+        build.flag("/std:c++20").flag("/EHs-").flag("/GR-");
+    } else {
+        // GCC/Clang flags
+        build
+            .flag("-std=c++20")
+            .flag("-fno-exceptions")
+            .flag("-fno-rtti")
+            .flag("-Wno-unused-parameter")
+            .flag("-O2");
+    }
+
+    build.compile("v8_helpers");
 }
 
 /// Get Node.js include directory for V8 headers.
-/// Resolves symlinks to find the actual install prefix.
+///
+/// Checks multiple locations:
+/// 1. Standard Node.js install prefix (Linux/macOS with dev headers)
+/// 2. node-gyp cache (Windows, or when headers installed via `npx node-gyp install`)
+/// 3. Auto-installs headers via node-gyp if not found
 fn node_include_dir() -> String {
+    let script = r#"
+const p = require('path'), fs = require('fs');
+
+function find(dirs) {
+    for (const d of dirs) {
+        if (d && fs.existsSync(p.join(d, 'v8.h'))) return d;
+    }
+    return null;
+}
+
+const real = fs.realpathSync(process.execPath);
+const stdDir = p.resolve(real, '..', '..', 'include', 'node');
+const v = process.version.slice(1);
+const home = process.env.HOME || '';
+const la = process.env.LOCALAPPDATA || '';
+const gypDirs = [
+    p.join(home, '.node-gyp', v, 'include', 'node'),
+    p.join(la, 'node-gyp', 'Cache', v, 'include', 'node'),
+];
+
+let dir = find([stdDir, ...gypDirs]);
+if (dir) { console.log(dir); process.exit(0); }
+
+// Auto-install headers via node-gyp
+try {
+    require('child_process').execSync('npx --yes node-gyp install', { stdio: 'inherit' });
+} catch {}
+
+dir = find(gypDirs);
+if (dir) { console.log(dir); process.exit(0); }
+
+process.exit(1);
+"#;
+
     let output = std::process::Command::new("node")
-        .args([
-            "-e",
-            "const p = require('path'); \
-             const fs = require('fs'); \
-             const real = fs.realpathSync(process.execPath); \
-             console.log(p.resolve(real, '..', '..', 'include', 'node'));",
-        ])
+        .args(["-e", script])
         .output()
         .expect("Failed to find Node.js. Make sure `node` is in your PATH.");
 
-    let dir = String::from_utf8(output.stdout)
-        .expect("Invalid UTF-8 in Node.js include path")
-        .trim()
-        .to_string();
-
-    let v8_header = std::path::Path::new(&dir).join("v8.h");
-    if !v8_header.exists() {
-        panic!(
-            "V8 headers not found at {dir}/v8.h. \
-             Install Node.js development headers."
-        );
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .expect("Invalid UTF-8 in Node.js include path")
+            .trim()
+            .to_string();
     }
 
-    dir
+    panic!(
+        "V8 headers not found. Install Node.js development headers \
+         or run: npx node-gyp install"
+    );
 }
