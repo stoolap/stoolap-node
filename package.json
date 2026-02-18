@@ -1,0 +1,60 @@
+{
+  "name": "@stoolap/node",
+  "version": "0.3.1",
+  "description": "High-performance Node.js driver for Stoolap embedded SQL database",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "stoolap",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "scripts": {
+    "build": "napi build --platform --release --no-dts-header && node scripts/patch-dts.mjs",
+    "build:debug": "napi build --platform --no-dts-header && node scripts/patch-dts.mjs",
+    "test": "node --test __test__/index.spec.mjs",
+    "prepublishOnly": "napi prepublish -t npm"
+  },
+  "optionalDependencies": {
+    "@stoolap/node-darwin-arm64": "0.3.1",
+    "@stoolap/node-darwin-x64": "0.3.1",
+    "@stoolap/node-linux-arm64-gnu": "0.3.1",
+    "@stoolap/node-linux-x64-gnu": "0.3.1",
+    "@stoolap/node-win32-x64-msvc": "0.3.1"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0",
+    "better-sqlite3": "^12.6.2"
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stoolap/stoolap-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stoolap/stoolap-node/issues"
+  },
+  "homepage": "https://github.com/stoolap/stoolap-node",
+  "keywords": [
+    "database",
+    "sql",
+    "embedded",
+    "mvcc",
+    "acid",
+    "stoolap",
+    "napi",
+    "native"
+  ]
+}

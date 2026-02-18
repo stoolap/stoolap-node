@@ -1,0 +1,32 @@
+[package]
+name = "stoolap-node"
+version = "0.3.1"
+edition = "2021"
+authors = ["Stoolap Contributors"]
+license = "Apache-2.0"
+description = "High-performance Node.js driver for Stoolap embedded SQL database"
+repository = "https://github.com/stoolap/stoolap-node"
+homepage = "https://stoolap.io"
+readme = "README.md"
+keywords = ["database", "sql", "embedded", "nodejs", "napi"]
+categories = ["database", "api-bindings"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+stoolap = { version = "0.3.1", default-features = false, features = ["parallel"] }
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+chrono = "0.4"
+itoa = "1"
+
+[build-dependencies]
+napi-build = "2"
+cc = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = "symbols"
