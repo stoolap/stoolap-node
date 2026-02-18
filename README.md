@@ -5,7 +5,7 @@ High-performance Node.js driver for [Stoolap](https://github.com/stoolap/stoolap
 Built with [NAPI-RS](https://napi.rs) for native performance. Provides both async and sync APIs with direct V8 object creation for minimal overhead.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 
 ## Installation
 
@@ -395,7 +395,7 @@ try {
 
 Requires:
 - [Rust](https://rustup.rs) (stable)
-- [Node.js](https://nodejs.org) >= 18 (with development headers)
+- [Node.js](https://nodejs.org) >= 22 (with development headers)
 - C++ compiler (for V8 helpers)
 
 ```bash
