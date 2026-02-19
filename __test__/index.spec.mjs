@@ -591,3 +591,899 @@ describe('Concurrency', () => {
     await db.close();
   });
 });
+
+// ============================================================
+// Sync methods — Database
+// ============================================================
+
+describe('Sync methods', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    db.execSync(`
+      CREATE TABLE sync_test (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        score FLOAT
+      )
+    `);
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should execSync create tables', () => {
+    db.execSync('CREATE TABLE sync_extra (id INTEGER PRIMARY KEY, val TEXT)');
+    const tables = db.querySync('SHOW TABLES');
+    const names = tables.map(t => t.table_name || t.Tables);
+    assert.ok(names.some(n => n === 'sync_extra'));
+  });
+
+  it('should executeSync with positional params', () => {
+    const r = db.executeSync(
+      'INSERT INTO sync_test (id, name, score) VALUES ($1, $2, $3)',
+      [1, 'Alice', 95.5]
+    );
+    assert.equal(r.changes, 1);
+  });
+
+  it('should executeSync with named params', () => {
+    const r = db.executeSync(
+      'INSERT INTO sync_test (id, name, score) VALUES (:id, :name, :score)',
+      { id: 2, name: 'Bob', score: 87.3 }
+    );
+    assert.equal(r.changes, 1);
+  });
+
+  it('should querySync return array of objects', () => {
+    const rows = db.querySync('SELECT * FROM sync_test ORDER BY id');
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].name, 'Alice');
+    assert.equal(rows[1].name, 'Bob');
+  });
+
+  it('should querySync with positional params', () => {
+    const rows = db.querySync('SELECT * FROM sync_test WHERE id = $1', [1]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].name, 'Alice');
+  });
+
+  it('should querySync with named params', () => {
+    const rows = db.querySync(
+      'SELECT * FROM sync_test WHERE name = :name',
+      { name: 'Bob' }
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, 2);
+  });
+
+  it('should queryOneSync return object', () => {
+    const row = db.queryOneSync('SELECT * FROM sync_test WHERE id = $1', [1]);
+    assert.ok(row);
+    assert.equal(row.name, 'Alice');
+    assert.ok(Math.abs(row.score - 95.5) < 0.01);
+  });
+
+  it('should queryOneSync return null for no results', () => {
+    const row = db.queryOneSync('SELECT * FROM sync_test WHERE id = $1', [999]);
+    assert.equal(row, null);
+  });
+
+  it('should queryOneSync with named params', () => {
+    const row = db.queryOneSync(
+      'SELECT * FROM sync_test WHERE id = :id',
+      { id: 2 }
+    );
+    assert.ok(row);
+    assert.equal(row.name, 'Bob');
+  });
+
+  it('should queryRawSync return columns and rows', () => {
+    const raw = db.queryRawSync('SELECT id, name FROM sync_test ORDER BY id');
+    assert.deepEqual(raw.columns, ['id', 'name']);
+    assert.equal(raw.rows.length, 2);
+    assert.deepEqual(raw.rows[0], [1, 'Alice']);
+    assert.deepEqual(raw.rows[1], [2, 'Bob']);
+  });
+
+  it('should queryRawSync with named params', () => {
+    const raw = db.queryRawSync(
+      'SELECT id, name FROM sync_test WHERE score > :min',
+      { min: 90.0 }
+    );
+    assert.equal(raw.rows.length, 1);
+    assert.deepEqual(raw.rows[0], [1, 'Alice']);
+  });
+
+  it('should queryRawSync return empty rows for no results', () => {
+    const raw = db.queryRawSync('SELECT * FROM sync_test WHERE id = $1', [999]);
+    assert.ok(Array.isArray(raw.columns));
+    assert.equal(raw.rows.length, 0);
+  });
+});
+
+// ============================================================
+// Batch execution
+// ============================================================
+
+describe('Batch execution', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    db.execSync('CREATE TABLE batch_test (id INTEGER PRIMARY KEY, name TEXT, val INTEGER)');
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should executeBatchSync insert multiple rows', () => {
+    const result = db.executeBatchSync(
+      'INSERT INTO batch_test VALUES ($1, $2, $3)',
+      [
+        [1, 'Alice', 10],
+        [2, 'Bob', 20],
+        [3, 'Charlie', 30],
+      ]
+    );
+    assert.equal(result.changes, 3);
+
+    const rows = db.querySync('SELECT * FROM batch_test ORDER BY id');
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0].name, 'Alice');
+    assert.equal(rows[2].val, 30);
+  });
+
+  it('should executeBatchSync with single param set', () => {
+    const result = db.executeBatchSync(
+      'INSERT INTO batch_test VALUES ($1, $2, $3)',
+      [[4, 'Diana', 40]]
+    );
+    assert.equal(result.changes, 1);
+  });
+
+  it('should executeBatchSync for deletes', () => {
+    db.executeBatchSync(
+      'INSERT INTO batch_test VALUES ($1, $2, $3)',
+      [
+        [100, 'del-a', 0],
+        [101, 'del-b', 0],
+      ]
+    );
+    const result = db.executeBatchSync(
+      'DELETE FROM batch_test WHERE id = $1',
+      [[100], [101]]
+    );
+    assert.equal(result.changes, 2);
+  });
+});
+
+// ============================================================
+// Prepared statement — sync methods
+// ============================================================
+
+describe('PreparedStatement sync', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    db.execSync('CREATE TABLE ps_sync (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN)');
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should executeSync with prepared statement', () => {
+    const stmt = db.prepare('INSERT INTO ps_sync VALUES ($1, $2, $3)');
+    const r1 = stmt.executeSync([1, 'Alice', true]);
+    assert.equal(r1.changes, 1);
+    const r2 = stmt.executeSync([2, 'Bob', false]);
+    assert.equal(r2.changes, 1);
+    stmt.executeSync([3, 'Charlie', true]);
+  });
+
+  it('should querySync with prepared statement', () => {
+    const stmt = db.prepare('SELECT * FROM ps_sync WHERE active = $1');
+    const rows = stmt.querySync([true]);
+    assert.equal(rows.length, 2);
+  });
+
+  it('should queryOneSync with prepared statement', () => {
+    const stmt = db.prepare('SELECT * FROM ps_sync WHERE id = $1');
+    const row = stmt.queryOneSync([2]);
+    assert.ok(row);
+    assert.equal(row.name, 'Bob');
+    assert.equal(row.active, false);
+  });
+
+  it('should queryOneSync return null for no results', () => {
+    const stmt = db.prepare('SELECT * FROM ps_sync WHERE id = $1');
+    const row = stmt.queryOneSync([999]);
+    assert.equal(row, null);
+  });
+
+  it('should queryRawSync with prepared statement', () => {
+    const stmt = db.prepare('SELECT id, name FROM ps_sync ORDER BY id');
+    const raw = stmt.queryRawSync();
+    assert.deepEqual(raw.columns, ['id', 'name']);
+    assert.equal(raw.rows.length, 3);
+    assert.deepEqual(raw.rows[0], [1, 'Alice']);
+  });
+
+  it('should executeBatchSync with prepared statement', () => {
+    const stmt = db.prepare('INSERT INTO ps_sync VALUES ($1, $2, $3)');
+    const result = stmt.executeBatchSync([
+      [10, 'Dave', true],
+      [11, 'Eve', false],
+      [12, 'Frank', true],
+    ]);
+    assert.equal(result.changes, 3);
+    const rows = db.querySync('SELECT * FROM ps_sync ORDER BY id');
+    assert.equal(rows.length, 6);
+  });
+
+  it('should expose sql property', () => {
+    const stmt = db.prepare('SELECT * FROM ps_sync WHERE id = $1');
+    assert.equal(stmt.sql, 'SELECT * FROM ps_sync WHERE id = $1');
+  });
+
+  it('should throw on invalid SQL at prepare time', () => {
+    assert.throws(
+      () => db.prepare('SELECTX INVALID'),
+      (err) => {
+        assert.ok(err.message.length > 0);
+        return true;
+      }
+    );
+  });
+});
+
+// ============================================================
+// Transaction — sync methods
+// ============================================================
+
+describe('Transaction sync', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    db.execSync('CREATE TABLE tx_sync (id INTEGER PRIMARY KEY, val TEXT)');
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should beginSync and commitSync', () => {
+    const tx = db.beginSync();
+    tx.executeSync('INSERT INTO tx_sync VALUES ($1, $2)', [1, 'committed']);
+    tx.commitSync();
+
+    const rows = db.querySync('SELECT * FROM tx_sync WHERE id = $1', [1]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].val, 'committed');
+  });
+
+  it('should beginSync and rollbackSync', () => {
+    const tx = db.beginSync();
+    tx.executeSync('INSERT INTO tx_sync VALUES ($1, $2)', [2, 'rolled-back']);
+    tx.rollbackSync();
+
+    const rows = db.querySync('SELECT * FROM tx_sync WHERE id = $1', [2]);
+    assert.equal(rows.length, 0);
+  });
+
+  it('should querySync within sync transaction', () => {
+    const tx = db.beginSync();
+    tx.executeSync('INSERT INTO tx_sync VALUES ($1, $2)', [3, 'visible']);
+    const rows = tx.querySync('SELECT * FROM tx_sync WHERE id = $1', [3]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].val, 'visible');
+    tx.commitSync();
+  });
+
+  it('should queryOneSync within sync transaction', () => {
+    const tx = db.beginSync();
+    tx.executeSync('INSERT INTO tx_sync VALUES ($1, $2)', [4, 'one-row']);
+    const row = tx.queryOneSync('SELECT * FROM tx_sync WHERE id = $1', [4]);
+    assert.ok(row);
+    assert.equal(row.val, 'one-row');
+
+    const missing = tx.queryOneSync('SELECT * FROM tx_sync WHERE id = $1', [999]);
+    assert.equal(missing, null);
+    tx.commitSync();
+  });
+
+  it('should queryRawSync within sync transaction', () => {
+    const tx = db.beginSync();
+    const raw = tx.queryRawSync('SELECT id, val FROM tx_sync ORDER BY id');
+    assert.ok(raw.columns.length > 0);
+    assert.ok(raw.rows.length > 0);
+    tx.commitSync();
+  });
+
+  it('should executeBatchSync within transaction', () => {
+    const tx = db.beginSync();
+    const result = tx.executeBatchSync(
+      'INSERT INTO tx_sync VALUES ($1, $2)',
+      [
+        [10, 'batch-a'],
+        [11, 'batch-b'],
+        [12, 'batch-c'],
+      ]
+    );
+    assert.equal(result.changes, 3);
+    tx.commitSync();
+
+    const rows = db.querySync('SELECT * FROM tx_sync WHERE id >= $1 ORDER BY id', [10]);
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0].val, 'batch-a');
+    assert.equal(rows[2].val, 'batch-c');
+  });
+});
+
+// ============================================================
+// Transaction — async queryRaw
+// ============================================================
+
+describe('Transaction async queryRaw', () => {
+  it('should queryRaw within async transaction', async () => {
+    const db = await Database.open(':memory:');
+    await db.exec('CREATE TABLE tx_raw (id INTEGER PRIMARY KEY, val TEXT)');
+
+    const tx = await db.begin();
+    await tx.execute('INSERT INTO tx_raw VALUES ($1, $2)', [1, 'hello']);
+    await tx.execute('INSERT INTO tx_raw VALUES ($1, $2)', [2, 'world']);
+
+    const raw = await tx.queryRaw('SELECT id, val FROM tx_raw ORDER BY id');
+    assert.deepEqual(raw.columns, ['id', 'val']);
+    assert.equal(raw.rows.length, 2);
+    // Verify both rows exist (order may vary within transaction)
+    const ids = raw.rows.map(r => r[0]).sort();
+    assert.deepEqual(ids, [1, 2]);
+
+    await tx.commit();
+    await db.close();
+  });
+});
+
+// ============================================================
+// Named parameters — comprehensive
+// ============================================================
+
+describe('Named parameters', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    await db.exec(`
+      CREATE TABLE named_test (
+        id INTEGER PRIMARY KEY,
+        name TEXT,
+        city TEXT,
+        score FLOAT
+      )
+    `);
+    await db.execute(
+      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
+      { id: 1, name: 'Alice', city: 'NYC', score: 95.0 }
+    );
+    await db.execute(
+      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
+      { id: 2, name: 'Bob', city: 'SF', score: 88.5 }
+    );
+    await db.execute(
+      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
+      { id: 3, name: 'Charlie', city: 'NYC', score: 72.0 }
+    );
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should query with named params', async () => {
+    const rows = await db.query(
+      'SELECT * FROM named_test WHERE city = :city ORDER BY id',
+      { city: 'NYC' }
+    );
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].name, 'Alice');
+    assert.equal(rows[1].name, 'Charlie');
+  });
+
+  it('should queryOne with named params', async () => {
+    const row = await db.queryOne(
+      'SELECT * FROM named_test WHERE name = :name',
+      { name: 'Bob' }
+    );
+    assert.ok(row);
+    assert.equal(row.city, 'SF');
+  });
+
+  it('should queryRaw with named params', async () => {
+    const raw = await db.queryRaw(
+      'SELECT id, name FROM named_test WHERE score > :min ORDER BY id',
+      { min: 80.0 }
+    );
+    assert.deepEqual(raw.columns, ['id', 'name']);
+    assert.equal(raw.rows.length, 2);
+    assert.deepEqual(raw.rows[0], [1, 'Alice']);
+  });
+
+  it('should update with named params', async () => {
+    const r = await db.execute(
+      'UPDATE named_test SET score = :score WHERE name = :name',
+      { score: 99.0, name: 'Charlie' }
+    );
+    assert.equal(r.changes, 1);
+    const row = await db.queryOne('SELECT score FROM named_test WHERE id = $1', [3]);
+    assert.equal(row.score, 99.0);
+  });
+
+  it('should delete with named params', async () => {
+    await db.execute(
+      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
+      { id: 99, name: 'Temp', city: 'X', score: 0 }
+    );
+    const r = await db.execute(
+      'DELETE FROM named_test WHERE id = :id',
+      { id: 99 }
+    );
+    assert.equal(r.changes, 1);
+  });
+
+  it('should use positional params in async transaction', async () => {
+    const tx = await db.begin();
+    await tx.execute(
+      'INSERT INTO named_test VALUES ($1, $2, $3, $4)',
+      [50, 'TxPos', 'LA', 50.0]
+    );
+    const row = await tx.queryOne(
+      'SELECT * FROM named_test WHERE id = $1',
+      [50]
+    );
+    assert.ok(row);
+    assert.equal(row.name, 'TxPos');
+    await tx.rollback();
+  });
+
+  it('should use positional params in sync transaction', () => {
+    const tx = db.beginSync();
+    tx.executeSync(
+      'INSERT INTO named_test VALUES ($1, $2, $3, $4)',
+      [51, 'SyncPos', 'CHI', 60.0]
+    );
+    const row = tx.queryOneSync(
+      'SELECT * FROM named_test WHERE name = $1',
+      ['SyncPos']
+    );
+    assert.ok(row);
+    assert.equal(row.city, 'CHI');
+    tx.rollbackSync();
+  });
+});
+
+// ============================================================
+// Type conversions — extended
+// ============================================================
+
+describe('Extended type conversions', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    await db.exec(`
+      CREATE TABLE ext_types (
+        id INTEGER PRIMARY KEY,
+        int_val INTEGER,
+        float_val FLOAT,
+        text_val TEXT,
+        bool_val BOOLEAN,
+        ts_val TIMESTAMP,
+        json_val JSON
+      )
+    `);
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should handle undefined as NULL', async () => {
+    await db.execute(
+      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
+      [1, undefined]
+    );
+    const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [1]);
+    assert.equal(row.text_val, null);
+  });
+
+  it('should handle BigInt parameter', async () => {
+    await db.execute(
+      'INSERT INTO ext_types (id, int_val) VALUES ($1, $2)',
+      [2, BigInt(123456789)]
+    );
+    const row = await db.queryOne('SELECT int_val FROM ext_types WHERE id = $1', [2]);
+    assert.equal(row.int_val, 123456789);
+  });
+
+  it('should handle Date parameter as TIMESTAMP', async () => {
+    const date = new Date('2025-06-15T10:30:00Z');
+    await db.execute(
+      'INSERT INTO ext_types (id, ts_val) VALUES ($1, $2)',
+      [3, date]
+    );
+    const row = await db.queryOne('SELECT ts_val FROM ext_types WHERE id = $1', [3]);
+    assert.ok(row.ts_val);
+    // Verify the timestamp round-trips (string or Date)
+    const returned = new Date(row.ts_val);
+    assert.equal(returned.getUTCFullYear(), 2025);
+    assert.equal(returned.getUTCMonth(), 5); // June = 5
+    assert.equal(returned.getUTCDate(), 15);
+  });
+
+  it('should handle negative numbers', async () => {
+    await db.execute(
+      'INSERT INTO ext_types (id, int_val, float_val) VALUES ($1, $2, $3)',
+      [4, -42, -3.14]
+    );
+    const row = await db.queryOne('SELECT int_val, float_val FROM ext_types WHERE id = $1', [4]);
+    assert.equal(row.int_val, -42);
+    assert.ok(Math.abs(row.float_val - (-3.14)) < 0.001);
+  });
+
+  it('should handle zero values', async () => {
+    await db.execute(
+      'INSERT INTO ext_types (id, int_val, float_val) VALUES ($1, $2, $3)',
+      [5, 0, 0.0]
+    );
+    const row = await db.queryOne('SELECT int_val, float_val FROM ext_types WHERE id = $1', [5]);
+    assert.equal(row.int_val, 0);
+    assert.equal(row.float_val, 0.0);
+  });
+
+  it('should handle empty string', async () => {
+    await db.execute(
+      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
+      [6, '']
+    );
+    const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [6]);
+    assert.equal(row.text_val, '');
+  });
+
+  it('should handle unicode text', async () => {
+    const unicode = '日本語テスト 🎉 émojis àccénts';
+    await db.execute(
+      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
+      [7, unicode]
+    );
+    const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [7]);
+    assert.equal(row.text_val, unicode);
+  });
+
+  it('should handle very long text', async () => {
+    const longText = 'x'.repeat(100000);
+    await db.execute(
+      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
+      [8, longText]
+    );
+    const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [8]);
+    assert.equal(row.text_val.length, 100000);
+  });
+
+  it('should handle Object parameter as JSON', async () => {
+    const obj = { users: [{ name: 'Alice' }, { name: 'Bob' }], count: 2 };
+    await db.execute(
+      'INSERT INTO ext_types (id, json_val) VALUES ($1, $2)',
+      [9, obj]
+    );
+    const row = await db.queryOne('SELECT json_val FROM ext_types WHERE id = $1', [9]);
+    const parsed = JSON.parse(row.json_val);
+    assert.equal(parsed.count, 2);
+    assert.equal(parsed.users[0].name, 'Alice');
+  });
+
+  it('should handle Array parameter as JSON', async () => {
+    const arr = [1, 'two', { three: 3 }];
+    await db.execute(
+      'INSERT INTO ext_types (id, json_val) VALUES ($1, $2)',
+      [10, arr]
+    );
+    const row = await db.queryOne('SELECT json_val FROM ext_types WHERE id = $1', [10]);
+    const parsed = JSON.parse(row.json_val);
+    assert.equal(parsed.length, 3);
+    assert.equal(parsed[0], 1);
+    assert.equal(parsed[1], 'two');
+    assert.equal(parsed[2].three, 3);
+  });
+});
+
+// ============================================================
+// Persistence — comprehensive
+// ============================================================
+
+describe('Persistence', () => {
+  it('should persist multiple tables and types across restart', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stoolap-persist-'));
+    const dbPath = path.join(tmpDir, 'persist.db');
+    try {
+      // Write phase
+      const db = await Database.open(dbPath);
+      await db.exec(`
+        CREATE TABLE kv (id INTEGER PRIMARY KEY, k TEXT, v TEXT);
+        CREATE TABLE nums (id INTEGER PRIMARY KEY, val FLOAT, active BOOLEAN)
+      `);
+      await db.execute('INSERT INTO kv VALUES ($1, $2, $3)', [1, 'greeting', 'hello']);
+      await db.execute('INSERT INTO kv VALUES ($1, $2, $3)', [2, 'farewell', 'goodbye']);
+      await db.execute('INSERT INTO nums VALUES ($1, $2, $3)', [1, 3.14, true]);
+      await db.execute('INSERT INTO nums VALUES ($1, $2, $3)', [2, 2.71, false]);
+      await db.close();
+
+      // Read phase — reopen
+      const db2 = await Database.open(dbPath);
+      const kv = await db2.query('SELECT * FROM kv ORDER BY k');
+      assert.equal(kv.length, 2);
+      assert.equal(kv[0].k, 'farewell');
+      assert.equal(kv[0].v, 'goodbye');
+      assert.equal(kv[1].k, 'greeting');
+      assert.equal(kv[1].v, 'hello');
+
+      const nums = await db2.query('SELECT * FROM nums ORDER BY id');
+      assert.equal(nums.length, 2);
+      assert.ok(Math.abs(nums[0].val - 3.14) < 0.01);
+      assert.equal(nums[0].active, true);
+      assert.equal(nums[1].active, false);
+
+      await db2.close();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should persist after batch insert', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stoolap-batch-'));
+    const dbPath = path.join(tmpDir, 'batch.db');
+    try {
+      const db = await Database.open(dbPath);
+      db.execSync('CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)');
+      db.executeBatchSync(
+        'INSERT INTO items VALUES ($1, $2)',
+        [
+          [1, 'alpha'],
+          [2, 'beta'],
+          [3, 'gamma'],
+        ]
+      );
+      await db.close();
+
+      const db2 = await Database.open(dbPath);
+      const rows = await db2.query('SELECT * FROM items ORDER BY id');
+      assert.equal(rows.length, 3);
+      assert.equal(rows[0].name, 'alpha');
+      assert.equal(rows[2].name, 'gamma');
+      await db2.close();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should persist transaction commit but not rollback', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stoolap-tx-persist-'));
+    const dbPath = path.join(tmpDir, 'tx.db');
+    try {
+      const db = await Database.open(dbPath);
+      await db.exec('CREATE TABLE txp (id INTEGER PRIMARY KEY, val TEXT)');
+
+      // Committed transaction
+      const tx1 = await db.begin();
+      await tx1.execute('INSERT INTO txp VALUES ($1, $2)', [1, 'kept']);
+      await tx1.commit();
+
+      // Rolled back transaction
+      const tx2 = await db.begin();
+      await tx2.execute('INSERT INTO txp VALUES ($1, $2)', [2, 'discarded']);
+      await tx2.rollback();
+
+      await db.close();
+
+      // Verify
+      const db2 = await Database.open(dbPath);
+      const rows = await db2.query('SELECT * FROM txp ORDER BY id');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].val, 'kept');
+      await db2.close();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ============================================================
+// Database open variations
+// ============================================================
+
+describe('Database open variations', () => {
+  it('should open with memory:// URI', async () => {
+    const db = await Database.open('memory://');
+    await db.exec('CREATE TABLE t (id INTEGER)');
+    db.executeSync('INSERT INTO t VALUES ($1)', [1]);
+    const rows = db.querySync('SELECT * FROM t');
+    assert.equal(rows.length, 1);
+    await db.close();
+  });
+
+  it('should open with file:// URI', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stoolap-uri-'));
+    const dbPath = path.join(tmpDir, 'uri.db');
+    try {
+      const db = await Database.open(`file://${dbPath}`);
+      await db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+      await db.execute('INSERT INTO t VALUES ($1)', [1]);
+      const rows = await db.query('SELECT * FROM t');
+      assert.equal(rows.length, 1);
+      await db.close();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ============================================================
+// Error handling — extended
+// ============================================================
+
+describe('Error handling extended', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    db.execSync('CREATE TABLE err_ext (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should throw on sync invalid SQL', () => {
+    assert.throws(
+      () => db.querySync('SELECTX bad'),
+      (err) => {
+        assert.ok(err.message.length > 0);
+        return true;
+      }
+    );
+  });
+
+  it('should throw on sync NOT NULL violation', () => {
+    assert.throws(
+      () => db.executeSync('INSERT INTO err_ext (id, name) VALUES ($1, $2)', [1, null]),
+      (err) => {
+        assert.ok(err.message.length > 0);
+        return true;
+      }
+    );
+  });
+
+  it('should throw on execSync invalid SQL', () => {
+    assert.throws(
+      () => db.execSync('INVALID SQL STATEMENT'),
+      (err) => {
+        assert.ok(err.message.length > 0);
+        return true;
+      }
+    );
+  });
+
+  it('should throw on queryRaw with invalid SQL', async () => {
+    await assert.rejects(
+      () => db.queryRaw('SELECTX bad'),
+      (err) => {
+        assert.ok(err.message.length > 0);
+        return true;
+      }
+    );
+  });
+
+  it('should throw on queryRawSync with invalid SQL', () => {
+    assert.throws(
+      () => db.queryRawSync('SELECTX bad'),
+      (err) => {
+        assert.ok(err.message.length > 0);
+        return true;
+      }
+    );
+  });
+});
+
+// ============================================================
+// Edge cases
+// ============================================================
+
+describe('Edge cases', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should handle empty table query', async () => {
+    await db.exec('CREATE TABLE empty_tbl (id INTEGER PRIMARY KEY, val TEXT)');
+    const rows = await db.query('SELECT * FROM empty_tbl');
+    assert.deepEqual(rows, []);
+  });
+
+  it('should handle empty table queryRaw', async () => {
+    const raw = await db.queryRaw('SELECT * FROM empty_tbl');
+    assert.ok(Array.isArray(raw.columns));
+    assert.ok(raw.columns.length > 0);
+    assert.deepEqual(raw.rows, []);
+  });
+
+  it('should handle query with no params argument', async () => {
+    await db.exec('CREATE TABLE no_params (id INTEGER PRIMARY KEY)');
+    await db.execute('INSERT INTO no_params VALUES ($1)', [1]);
+    // Call without params argument at all
+    const rows = await db.query('SELECT * FROM no_params');
+    assert.equal(rows.length, 1);
+    const raw = await db.queryRaw('SELECT * FROM no_params');
+    assert.equal(raw.rows.length, 1);
+    const one = await db.queryOne('SELECT * FROM no_params');
+    assert.ok(one);
+  });
+
+  it('should handle large result set', async () => {
+    await db.exec('CREATE TABLE big (id INTEGER PRIMARY KEY, val INTEGER)');
+    const stmt = db.prepare('INSERT INTO big VALUES ($1, $2)');
+    const params = [];
+    for (let i = 0; i < 1000; i++) {
+      params.push([i, i * 2]);
+    }
+    stmt.executeBatchSync(params);
+
+    const rows = await db.query('SELECT * FROM big ORDER BY id');
+    assert.equal(rows.length, 1000);
+    assert.equal(rows[0].val, 0);
+    assert.equal(rows[999].val, 1998);
+  });
+
+  it('should handle large result set with queryRaw', async () => {
+    const raw = db.queryRawSync('SELECT * FROM big ORDER BY id');
+    assert.equal(raw.rows.length, 1000);
+  });
+
+  it('should handle multiple columns with same value types', async () => {
+    await db.exec('CREATE TABLE multi_col (a TEXT, b TEXT, c TEXT, d TEXT)');
+    await db.execute('INSERT INTO multi_col VALUES ($1, $2, $3, $4)', ['w', 'x', 'y', 'z']);
+    const row = await db.queryOne('SELECT * FROM multi_col');
+    assert.equal(row.a, 'w');
+    assert.equal(row.b, 'x');
+    assert.equal(row.c, 'y');
+    assert.equal(row.d, 'z');
+  });
+
+  it('should handle all NULL row', async () => {
+    await db.exec('CREATE TABLE all_null (a TEXT, b INTEGER, c FLOAT, d BOOLEAN)');
+    await db.execute('INSERT INTO all_null VALUES ($1, $2, $3, $4)', [null, null, null, null]);
+    const row = await db.queryOne('SELECT * FROM all_null');
+    assert.equal(row.a, null);
+    assert.equal(row.b, null);
+    assert.equal(row.c, null);
+    assert.equal(row.d, null);
+  });
+
+  it('should handle exec with trailing semicolons and whitespace', async () => {
+    await db.exec('  CREATE TABLE ws_test (id INTEGER PRIMARY KEY)  ;  ;  ');
+    const tables = await db.query('SHOW TABLES');
+    const names = tables.map(t => t.table_name || t.Tables);
+    assert.ok(names.some(n => n === 'ws_test'));
+  });
+});

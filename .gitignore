@@ -11,8 +11,7 @@ node_modules/
 npm/*/README.md
 npm/*/package.json
 
-# Benchmarks (devDependency on better-sqlite3)
-benchmark.mjs
+# Profiling scripts
 profile.mjs
 
 # OS
