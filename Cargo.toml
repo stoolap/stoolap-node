@@ -1,6 +1,6 @@
 [package]
 name = "stoolap-node"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["Stoolap Contributors"]
 license = "Apache-2.0"
@@ -15,7 +15,7 @@ categories = ["database", "api-bindings"]
 crate-type = ["cdylib"]
 
 [dependencies]
-stoolap = { version = "0.3.1", default-features = false, features = ["parallel"] }
+stoolap = { version = "0.3.2", default-features = false, features = ["parallel"] }
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 chrono = "0.4"
