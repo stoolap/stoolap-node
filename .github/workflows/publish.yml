@@ -83,22 +83,53 @@ jobs:
         with:
           path: artifacts
 
-      - name: Move artifacts
+      - name: Move artifacts to project root
         run: |
           for dir in artifacts/bindings-*/; do
             cp "$dir"*.node .
           done
           ls -la *.node
 
-      - name: Generate npm packages
-        run: npx napi prepublish -t npm
+      - name: Copy artifacts into platform packages
+        run: npx napi artifacts --output-dir . --npm-dir npm
+
+      - name: Update platform package versions
+        run: npx napi version
+
+      - name: Sync optionalDependencies versions
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const ver = pkg.version;
+            let changed = false;
+            for (const dep of Object.keys(pkg.optionalDependencies || {})) {
+              if (pkg.optionalDependencies[dep] !== ver) {
+                pkg.optionalDependencies[dep] = ver;
+                changed = true;
+              }
+            }
+            if (changed) {
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              console.log('Updated optionalDependencies to version ' + ver);
+            } else {
+              console.log('optionalDependencies already at version ' + ver);
+            }
+          "
+
+      - name: List platform packages
+        run: |
+          for pkg in npm/*/; do
+            echo "$pkg:"
+            ls -la "$pkg"
+          done
 
       - name: Publish platform packages
         run: |
           for pkg in npm/*/; do
             if [ -f "$pkg/package.json" ]; then
               echo "Publishing $pkg..."
-              npm publish "$pkg" --access public --provenance || true
+              npm publish "$pkg" --access public --provenance
             fi
           done
         env:

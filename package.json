@@ -1,6 +1,6 @@
 {
   "name": "@stoolap/node",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "High-performance Node.js driver for Stoolap embedded SQL database",
   "main": "index.js",
   "types": "index.d.ts",
@@ -22,14 +22,14 @@
     "build": "napi build --platform --release --no-dts-header && node scripts/patch-dts.mjs",
     "build:debug": "napi build --platform --no-dts-header && node scripts/patch-dts.mjs",
     "test": "node --test __test__/index.spec.mjs",
-    "prepublishOnly": "napi prepublish -t npm"
+    "prepublishOnly": "napi version"
   },
   "optionalDependencies": {
-    "@stoolap/node-darwin-arm64": "0.3.2",
-    "@stoolap/node-darwin-x64": "0.3.2",
-    "@stoolap/node-linux-arm64-gnu": "0.3.2",
-    "@stoolap/node-linux-x64-gnu": "0.3.2",
-    "@stoolap/node-win32-x64-msvc": "0.3.2"
+    "@stoolap/node-darwin-arm64": "0.3.3",
+    "@stoolap/node-darwin-x64": "0.3.3",
+    "@stoolap/node-linux-x64-gnu": "0.3.3",
+    "@stoolap/node-linux-arm64-gnu": "0.3.3",
+    "@stoolap/node-win32-x64-msvc": "0.3.3"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0",

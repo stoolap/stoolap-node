@@ -1,0 +1,37 @@
+{
+  "name": "@stoolap/node-darwin-x64",
+  "version": "0.3.3",
+  "cpu": [
+    "x64"
+  ],
+  "main": "stoolap.darwin-x64.node",
+  "files": [
+    "stoolap.darwin-x64.node"
+  ],
+  "description": "High-performance Node.js driver for Stoolap embedded SQL database",
+  "keywords": [
+    "database",
+    "sql",
+    "embedded",
+    "mvcc",
+    "acid",
+    "stoolap",
+    "napi",
+    "native"
+  ],
+  "homepage": "https://github.com/stoolap/stoolap-node",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stoolap/stoolap-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stoolap/stoolap-node/issues"
+  },
+  "os": [
+    "darwin"
+  ]
+}
