@@ -99,6 +99,37 @@ fn js_to_value_typed(env: sys::napi_env, val: sys::napi_value) -> napi::Result<V
         }
 
         napi::ValueType::Object => {
+            // Check TypedArray (Float32Array for vector params)
+            let mut is_typedarray = false;
+            check(unsafe { sys::napi_is_typedarray(env, val, &mut is_typedarray) })?;
+            if is_typedarray {
+                let mut typedarray_type = 0;
+                let mut length = 0;
+                let mut data = ptr::null_mut();
+                let mut arraybuffer = ptr::null_mut();
+                let mut offset = 0;
+                check(unsafe {
+                    sys::napi_get_typedarray_info(
+                        env,
+                        val,
+                        &mut typedarray_type,
+                        &mut length,
+                        &mut data,
+                        &mut arraybuffer,
+                        &mut offset,
+                    )
+                })?;
+                // napi_float32_array = 4
+                if typedarray_type == 4 {
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(data as *const f32, length) };
+                    return Ok(Value::vector(slice.to_vec()));
+                }
+                return Err(napi::Error::from_reason(
+                    "Only Float32Array is supported for vector parameters",
+                ));
+            }
+
             // Check Date
             let mut is_date = false;
             check(unsafe { sys::napi_is_date(env, val, &mut is_date) })?;

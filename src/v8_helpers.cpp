@@ -27,13 +27,14 @@
 
 // Cell type tags — must match Rust #[repr(u8)] CellTag
 enum CellTag : uint8_t {
-    TAG_NULL       = 0,
-    TAG_BOOL_FALSE = 1,
-    TAG_BOOL_TRUE  = 2,
-    TAG_INT32      = 3,
-    TAG_DOUBLE     = 4,
-    TAG_STRING     = 5,
-    TAG_INT64      = 6,
+    TAG_NULL          = 0,
+    TAG_BOOL_FALSE    = 1,
+    TAG_BOOL_TRUE     = 2,
+    TAG_INT32         = 3,
+    TAG_DOUBLE        = 4,
+    TAG_STRING        = 5,
+    TAG_INT64         = 6,
+    TAG_FLOAT32_ARRAY = 7,
 };
 
 // C-compatible cell data — must match Rust #[repr(C)] CellData layout
@@ -82,6 +83,13 @@ static inline v8::Local<v8::Value> cell_to_v8(v8::Isolate* isolate,
             // Large integers outside i32 range — still a JS Number (double).
             // Matches napi_create_int64 behavior (converts to double).
             return v8::Number::New(isolate, static_cast<double>(cell.int_val));
+        case TAG_FLOAT32_ARRAY: {
+            // Vector: str_ptr = packed LE f32 bytes, str_len = byte count
+            int byte_len = cell.str_len;
+            auto backing = v8::ArrayBuffer::New(isolate, byte_len);
+            memcpy(backing->GetBackingStore()->Data(), cell.str_ptr, byte_len);
+            return v8::Float32Array::New(backing, 0, byte_len / 4);
+        }
         default:
             return v8::Null(isolate);
     }

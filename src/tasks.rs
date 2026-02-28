@@ -34,6 +34,7 @@ const TAG_INT32: u8 = 3;
 const TAG_DOUBLE: u8 = 4;
 const TAG_STRING: u8 = 5;
 const TAG_INT64: u8 = 6;
+const TAG_FLOAT32_ARRAY: u8 = 7;
 
 /// C-compatible cell data — must match C++ CellData layout exactly.
 /// Passed to V8 helper for direct value creation (bypasses NAPI).
@@ -241,14 +242,33 @@ fn value_to_cell(val: &Value, temp_strings: &mut Vec<String>) -> CellData {
                 str_len: last.len() as i32,
             }
         }
-        Value::Json(s) => {
-            let s_ref: &str = s.as_ref();
-            CellData {
-                tag: TAG_STRING,
-                int_val: 0,
-                float_val: 0.0,
-                str_ptr: s_ref.as_ptr(),
-                str_len: s_ref.len() as i32,
+        Value::Extension(data) => {
+            if let Some(s_ref) = val.as_json() {
+                CellData {
+                    tag: TAG_STRING,
+                    int_val: 0,
+                    float_val: 0.0,
+                    str_ptr: s_ref.as_ptr(),
+                    str_len: s_ref.len() as i32,
+                }
+            } else if data.first() == Some(&7) {
+                // Vector: tag byte (7) + packed little-endian f32 payload
+                let payload = &data[1..];
+                CellData {
+                    tag: TAG_FLOAT32_ARRAY,
+                    int_val: 0,
+                    float_val: 0.0,
+                    str_ptr: payload.as_ptr(),
+                    str_len: payload.len() as i32,
+                }
+            } else {
+                CellData {
+                    tag: TAG_NULL,
+                    int_val: 0,
+                    float_val: 0.0,
+                    str_ptr: ptr::null(),
+                    str_len: 0,
+                }
             }
         }
     }

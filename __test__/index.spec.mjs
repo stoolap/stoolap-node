@@ -1487,3 +1487,179 @@ describe('Edge cases', () => {
     assert.ok(names.some(n => n === 'ws_test'));
   });
 });
+
+// ============================================================
+// Vector support
+// ============================================================
+
+describe('Vector support', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should create table with VECTOR column', async () => {
+    await db.exec('CREATE TABLE embeddings (id INTEGER PRIMARY KEY, embedding VECTOR(3))');
+    const tables = await db.query('SHOW TABLES');
+    const names = tables.map(t => t.table_name || t.Tables);
+    assert.ok(names.some(n => n === 'embeddings'));
+  });
+
+  it('should insert vectors via SQL string literals', async () => {
+    const result = await db.execute(
+      "INSERT INTO embeddings (id, embedding) VALUES (1, '[0.1, 0.2, 0.3]')"
+    );
+    assert.equal(result.changes, 1);
+  });
+
+  it('should insert multiple vectors', async () => {
+    await db.execute("INSERT INTO embeddings (id, embedding) VALUES (2, '[0.4, 0.5, 0.6]')");
+    await db.execute("INSERT INTO embeddings (id, embedding) VALUES (3, '[0.7, 0.8, 0.9]')");
+    const rows = await db.query('SELECT id FROM embeddings ORDER BY id');
+    assert.equal(rows.length, 3);
+  });
+
+  it('should return vectors as Float32Array', async () => {
+    const row = await db.queryOne('SELECT embedding FROM embeddings WHERE id = 1');
+    assert.ok(row.embedding instanceof Float32Array, 'embedding should be Float32Array');
+    assert.equal(row.embedding.length, 3);
+    assert.ok(Math.abs(row.embedding[0] - 0.1) < 0.001);
+    assert.ok(Math.abs(row.embedding[1] - 0.2) < 0.001);
+    assert.ok(Math.abs(row.embedding[2] - 0.3) < 0.001);
+  });
+
+  it('should return vectors in query() results', async () => {
+    const rows = await db.query('SELECT * FROM embeddings ORDER BY id');
+    assert.equal(rows.length, 3);
+    for (const row of rows) {
+      assert.ok(row.embedding instanceof Float32Array);
+      assert.equal(row.embedding.length, 3);
+    }
+  });
+
+  it('should return vectors in querySync() results', () => {
+    const rows = db.querySync('SELECT * FROM embeddings ORDER BY id');
+    assert.equal(rows.length, 3);
+    assert.ok(rows[0].embedding instanceof Float32Array);
+  });
+
+  it('should return vectors in queryOneSync() results', () => {
+    const row = db.queryOneSync('SELECT embedding FROM embeddings WHERE id = 2');
+    assert.ok(row.embedding instanceof Float32Array);
+    assert.ok(Math.abs(row.embedding[0] - 0.4) < 0.001);
+  });
+
+  it('should return vectors in queryRaw() results', async () => {
+    const raw = await db.queryRaw('SELECT id, embedding FROM embeddings ORDER BY id');
+    assert.ok(raw.columns.includes('embedding'));
+    assert.equal(raw.rows.length, 3);
+    const embIdx = raw.columns.indexOf('embedding');
+    assert.ok(raw.rows[0][embIdx] instanceof Float32Array);
+  });
+
+  it('should return vectors in queryRawSync() results', () => {
+    const raw = db.queryRawSync('SELECT id, embedding FROM embeddings ORDER BY id');
+    const embIdx = raw.columns.indexOf('embedding');
+    assert.ok(raw.rows[0][embIdx] instanceof Float32Array);
+  });
+
+  it('should handle NULL vectors', async () => {
+    await db.execute("INSERT INTO embeddings (id, embedding) VALUES (4, NULL)");
+    const row = await db.queryOne('SELECT embedding FROM embeddings WHERE id = 4');
+    assert.equal(row.embedding, null);
+  });
+
+  it('should compute L2 distance', async () => {
+    const rows = await db.query(
+      "SELECT id, VEC_DISTANCE_L2(embedding, '[0.1, 0.2, 0.3]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist"
+    );
+    assert.equal(rows.length, 3);
+    // id=1 has the same vector, distance should be ~0
+    assert.equal(rows[0].id, 1);
+    assert.ok(rows[0].dist < 0.001);
+  });
+
+  it('should compute cosine distance', async () => {
+    const rows = await db.query(
+      "SELECT id, VEC_DISTANCE_COSINE(embedding, '[0.1, 0.2, 0.3]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist"
+    );
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0].id, 1);
+    assert.ok(rows[0].dist < 0.001);
+  });
+
+  it('should support k-NN search with ORDER BY + LIMIT', async () => {
+    const rows = await db.query(
+      "SELECT id, VEC_DISTANCE_L2(embedding, '[0.4, 0.5, 0.6]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist LIMIT 2"
+    );
+    assert.equal(rows.length, 2);
+    // id=2 has exact match [0.4, 0.5, 0.6]
+    assert.equal(rows[0].id, 2);
+  });
+
+  it('should work with higher-dimensional vectors', async () => {
+    await db.exec('CREATE TABLE hd_vecs (id INTEGER PRIMARY KEY, vec VECTOR(128))');
+    const dims = 128;
+    const values = Array.from({ length: dims }, (_, i) => (i / dims).toFixed(6));
+    const vecStr = `[${values.join(', ')}]`;
+    await db.execute(`INSERT INTO hd_vecs (id, vec) VALUES (1, '${vecStr}')`);
+    const row = await db.queryOne('SELECT vec FROM hd_vecs WHERE id = 1');
+    assert.ok(row.vec instanceof Float32Array);
+    assert.equal(row.vec.length, dims);
+  });
+
+  it('should accept Float32Array as bind parameter', async () => {
+    await db.exec('CREATE TABLE vec_params (id INTEGER PRIMARY KEY, vec VECTOR(3))');
+    const vec = new Float32Array([1.0, 2.0, 3.0]);
+    await db.execute("INSERT INTO vec_params (id, vec) VALUES (1, '[1.0, 2.0, 3.0]')");
+    // Use Float32Array in distance computation param
+    const row = db.queryOneSync(
+      "SELECT VEC_DISTANCE_L2(vec, '[1.0, 2.0, 3.0]') AS dist FROM vec_params WHERE id = 1"
+    );
+    assert.ok(row.dist < 0.001);
+  });
+
+  it('should support vectors in transactions', async () => {
+    await db.exec('CREATE TABLE tx_vecs (id INTEGER PRIMARY KEY, vec VECTOR(3))');
+    const tx = await db.begin();
+    await tx.execute("INSERT INTO tx_vecs (id, vec) VALUES (1, '[1.0, 2.0, 3.0]')");
+    await tx.execute("INSERT INTO tx_vecs (id, vec) VALUES (2, '[4.0, 5.0, 6.0]')");
+    const rows = await tx.query('SELECT * FROM tx_vecs ORDER BY id');
+    assert.equal(rows.length, 2);
+    assert.ok(rows[0].vec instanceof Float32Array);
+    await tx.commit();
+
+    const afterCommit = await db.query('SELECT * FROM tx_vecs ORDER BY id');
+    assert.equal(afterCommit.length, 2);
+  });
+
+  it('should support VEC_DIMS utility function', async () => {
+    const row = await db.queryOne('SELECT VEC_DIMS(embedding) AS dims FROM embeddings WHERE id = 1');
+    assert.equal(row.dims, 3);
+  });
+
+  it('should reject wrong dimension count on insert', async () => {
+    await assert.rejects(
+      db.execute("INSERT INTO embeddings (id, embedding) VALUES (99, '[0.1, 0.2]')"),
+      /dimension|mismatch|expected/i
+    );
+  });
+
+  it('should support HNSW index creation', async () => {
+    await db.exec('CREATE TABLE hnsw_test (id INTEGER PRIMARY KEY, vec VECTOR(3))');
+    await db.execute("INSERT INTO hnsw_test (id, vec) VALUES (1, '[0.1, 0.2, 0.3]')");
+    await db.execute("INSERT INTO hnsw_test (id, vec) VALUES (2, '[0.4, 0.5, 0.6]')");
+    await db.execute("INSERT INTO hnsw_test (id, vec) VALUES (3, '[0.7, 0.8, 0.9]')");
+    await db.exec('CREATE INDEX idx_hnsw ON hnsw_test(vec) USING HNSW');
+    const rows = await db.query(
+      "SELECT id, VEC_DISTANCE_L2(vec, '[0.4, 0.5, 0.6]') AS dist FROM hnsw_test ORDER BY dist LIMIT 2"
+    );
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].id, 2);
+  });
+});
