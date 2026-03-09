@@ -11,7 +11,7 @@
       },
       "msvs_settings": {
         "VCCLCompilerTool": {
-          "AdditionalOptions": ["/std:c11"]
+          "AdditionalOptions": ["/TC"]
         }
       },
       "conditions": [
