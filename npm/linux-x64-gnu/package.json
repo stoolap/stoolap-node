@@ -1,28 +1,21 @@
 {
-  "name": "@stoolap/node-linux-x64-gnu",
-  "version": "0.3.3",
-  "cpu": [
-    "x64"
-  ],
-  "main": "stoolap.linux-x64-gnu.node",
+  "name": "@stoolap/lib-linux-x64-gnu",
+  "version": "0.3.4",
+  "main": "libstoolap.so",
   "files": [
-    "stoolap.linux-x64-gnu.node"
+    "libstoolap.so"
   ],
-  "description": "High-performance Node.js driver for Stoolap embedded SQL database",
+  "description": "Stoolap shared library for Linux x64 GNU",
   "keywords": [
     "database",
     "sql",
     "embedded",
-    "mvcc",
-    "acid",
-    "stoolap",
-    "napi",
-    "native"
+    "stoolap"
   ],
   "homepage": "https://github.com/stoolap/stoolap-node",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">= 22"
+    "node": ">= 18"
   },
   "repository": {
     "type": "git",
@@ -33,6 +26,9 @@
   },
   "os": [
     "linux"
+  ],
+  "cpu": [
+    "x64"
   ],
   "libc": [
     "glibc"

@@ -1,28 +1,21 @@
 {
-  "name": "@stoolap/node-win32-x64-msvc",
-  "version": "0.3.3",
-  "cpu": [
-    "x64"
-  ],
-  "main": "stoolap.win32-x64-msvc.node",
+  "name": "@stoolap/lib-win32-x64-msvc",
+  "version": "0.3.4",
+  "main": "stoolap.dll",
   "files": [
-    "stoolap.win32-x64-msvc.node"
+    "stoolap.dll"
   ],
-  "description": "High-performance Node.js driver for Stoolap embedded SQL database",
+  "description": "Stoolap shared library for Windows x64 MSVC",
   "keywords": [
     "database",
     "sql",
     "embedded",
-    "mvcc",
-    "acid",
-    "stoolap",
-    "napi",
-    "native"
+    "stoolap"
   ],
   "homepage": "https://github.com/stoolap/stoolap-node",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">= 22"
+    "node": ">= 18"
   },
   "repository": {
     "type": "git",
@@ -33,5 +26,8 @@
   },
   "os": [
     "win32"
+  ],
+  "cpu": [
+    "x64"
   ]
 }

@@ -1,3 +1,3 @@
-# `@stoolap/node-darwin-x64`
+# `@stoolap/lib-darwin-x64`
 
-This is the **x86_64-apple-darwin** binary for `@stoolap/node`
+This is the **x86_64-apple-darwin** shared library for `@stoolap/node`

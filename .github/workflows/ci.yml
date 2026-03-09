@@ -11,6 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  STOOLAP_ENGINE_REF: v0.3.4
+
 jobs:
   build:
     strategy:
@@ -19,51 +22,56 @@ jobs:
         settings:
           - host: macos-latest
             target: aarch64-apple-darwin
-            build: npx napi build --platform --release --no-dts-header --target aarch64-apple-darwin
+            lib: libstoolap.dylib
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: npx napi build --platform --release --no-dts-header --target x86_64-apple-darwin
+            lib: libstoolap.dylib
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: npx napi build --platform --release --no-dts-header --target x86_64-unknown-linux-gnu
+            lib: libstoolap.so
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: |
-              sudo apt-get update
-              sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-              export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-              export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
-              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-              npx napi build --platform --release --no-dts-header --target aarch64-unknown-linux-gnu
+            lib: libstoolap.so
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: npx napi build --platform --release --no-dts-header --target x86_64-pc-windows-msvc
+            lib: stoolap.dll
 
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      - name: Clone stoolap engine
+        run: git clone --depth 1 --branch ${{ env.STOOLAP_ENGINE_REF }} https://github.com/stoolap/stoolap.git stoolap-engine
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
 
-      - name: Install dependencies
-        run: npm install
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stoolap-engine
+          key: ${{ matrix.settings.target }}
 
-      - name: Build native addon
-        run: ${{ matrix.settings.build }}
+      - name: Install cross-compilation tools
+        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Upload artifact
+      - name: Build stoolap shared library
+        working-directory: stoolap-engine
+        run: cargo build --release --features ffi --target ${{ matrix.settings.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Upload shared library
         uses: actions/upload-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
-          path: '*.node'
+          name: lib-${{ matrix.settings.target }}
+          path: stoolap-engine/target/${{ matrix.settings.target }}/release/${{ matrix.settings.lib }}
           if-no-files-found: error
 
   test:
@@ -73,7 +81,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [22]
+        node: [18, 22]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -82,26 +90,26 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      - name: Install dependencies
-        run: npm install
-
       - name: Determine artifact name
         id: artifact
         shell: bash
         run: |
           if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            echo "name=bindings-aarch64-apple-darwin" >> $GITHUB_OUTPUT
+            echo "name=lib-aarch64-apple-darwin" >> $GITHUB_OUTPUT
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            echo "name=bindings-x86_64-unknown-linux-gnu" >> $GITHUB_OUTPUT
+            echo "name=lib-x86_64-unknown-linux-gnu" >> $GITHUB_OUTPUT
           elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            echo "name=bindings-x86_64-pc-windows-msvc" >> $GITHUB_OUTPUT
+            echo "name=lib-x86_64-pc-windows-msvc" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download artifact
+      - name: Download shared library
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.name }}
           path: .
+
+      - name: Install dependencies and build C addon
+        run: npm install --omit=optional
 
       - name: Run tests
         run: npm test

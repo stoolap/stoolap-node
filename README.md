@@ -1,11 +1,11 @@
 # @stoolap/node
 
-High-performance Node.js driver for [Stoolap](https://github.com/stoolap/stoolap) — a modern embedded SQL database with MVCC, time-travel queries, and full ACID compliance.
+High-performance Node.js driver for [Stoolap](https://github.com/stoolap/stoolap), a modern embedded SQL database with MVCC, time-travel queries, and full ACID compliance.
 
-Built with [NAPI-RS](https://napi.rs) for native performance. Provides both async and sync APIs with direct V8 object creation for minimal overhead.
+Built with a native N-API C addon for minimal overhead. Provides both async and sync APIs.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
 ## Installation
 
@@ -13,10 +13,15 @@ Built with [NAPI-RS](https://napi.rs) for native performance. Provides both asyn
 npm install @stoolap/node
 ```
 
-Pre-built binaries are available for:
+The stoolap engine shared library is pre-built for:
 - macOS (x64, ARM64)
 - Linux (x64, ARM64 GNU)
 - Windows (x64 MSVC)
+
+A C compiler is required to build the thin N-API addon on install (compiled automatically via `node-gyp`):
+- **macOS**: `xcode-select --install`
+- **Linux**: `sudo apt-get install build-essential` (or equivalent)
+- **Windows**: [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with "Desktop development with C++"
 
 ## Quick Start
 
@@ -59,7 +64,7 @@ const users = await db.query('SELECT * FROM users ORDER BY id');
 const user = await db.queryOne('SELECT * FROM users WHERE id = $1', [1]);
 // { id: 1, name: 'Alice', email: 'alice@example.com' }
 
-// Query in raw columnar format (faster — no per-row object creation)
+// Query in raw columnar format (faster, no per-row object creation)
 const raw = await db.queryRaw('SELECT id, name FROM users ORDER BY id');
 // { columns: ['id', 'name'], rows: [[1, 'Alice'], [2, 'Bob']] }
 
@@ -85,8 +90,9 @@ const db = await Database.open('file:///absolute/path/to/db');
 
 | Method | Returns | Description |
 |--------|---------|-------------|
+| `Database.open(path)` | `Promise<Database>` | Open a database |
 | `execute(sql, params?)` | `Promise<RunResult>` | Execute DML statement |
-| `exec(sql)` | `Promise<void>` | Execute one or more statements |
+| `exec(sql)` | `Promise<void>` | Execute a DDL statement |
 | `query(sql, params?)` | `Promise<Object[]>` | Query rows as objects |
 | `queryOne(sql, params?)` | `Promise<Object \| null>` | Query single row |
 | `queryRaw(sql, params?)` | `Promise<{columns, rows}>` | Query in columnar format |
@@ -95,18 +101,20 @@ const db = await Database.open('file:///absolute/path/to/db');
 
 #### Sync Methods
 
-Sync methods run on the main thread — faster for simple operations but block the event loop.
+Sync methods run on the main thread. Faster for simple operations but block the event loop.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
+| `Database.openSync(path)` | `Database` | Open a database |
 | `executeSync(sql, params?)` | `RunResult` | Execute DML statement |
-| `execSync(sql)` | `void` | Execute one or more statements |
+| `execSync(sql)` | `void` | Execute a DDL statement |
 | `querySync(sql, params?)` | `Object[]` | Query rows as objects |
 | `queryOneSync(sql, params?)` | `Object \| null` | Query single row |
 | `queryRawSync(sql, params?)` | `{columns, rows}` | Query in columnar format |
 | `executeBatchSync(sql, paramsArray)` | `RunResult` | Execute with multiple param sets |
 | `beginSync()` | `Transaction` | Begin a transaction |
 | `prepare(sql)` | `PreparedStatement` | Create a prepared statement |
+| `closeSync()` | `void` | Close the database |
 
 `RunResult` is `{ changes: number }`. It can be imported as a type:
 
@@ -125,7 +133,7 @@ await db.exec('CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT)');
 await db.execute('INSERT INTO kv VALUES ($1, $2)', ['hello', 'world']);
 await db.close();
 
-// Reopen — data is still there
+// Reopen: data is still there
 const db2 = await Database.open('./mydata');
 const row = await db2.queryOne('SELECT * FROM kv WHERE key = $1', ['hello']);
 // { key: 'hello', value: 'world' }
@@ -137,10 +145,10 @@ await db2.close();
 Pass configuration as query parameters in the path:
 
 ```js
-// Maximum durability — fsync on every WAL write
+// Maximum durability: fsync on every WAL write
 const db = await Database.open('./mydata?sync=full');
 
-// High throughput — no fsync, larger buffers
+// High throughput: no fsync, larger buffers
 const db = await Database.open('./mydata?sync=none&wal_buffer_size=131072');
 
 // Custom snapshot interval with compression
@@ -158,9 +166,9 @@ Controls the durability vs. performance trade-off:
 
 | Mode | Value | Description |
 |------|-------|-------------|
-| `none` | `sync=none` | No fsync — fastest, data may be lost on crash |
-| `normal` | `sync=normal` | Fsync on commit batches — good balance (default) |
-| `full` | `sync=full` | Fsync on every WAL write — slowest, maximum durability |
+| `none` | `sync=none` | No fsync. Fastest, data may be lost on crash |
+| `normal` | `sync=normal` | Fsync on commit batches. Good balance (default) |
+| `full` | `sync=full` | Fsync on every WAL write. Slowest, maximum durability |
 
 ##### All Configuration Parameters
 
@@ -176,7 +184,7 @@ Controls the durability vs. performance trade-off:
 | `sync_interval_ms` | `10` | Minimum ms between syncs (normal mode) |
 | `wal_compression` | `on` | LZ4 compression for WAL entries |
 | `snapshot_compression` | `on` | LZ4 compression for snapshots |
-| `compression` | — | Set both `wal_compression` and `snapshot_compression` |
+| `compression` | | Set both `wal_compression` and `snapshot_compression` |
 | `compression_threshold` | `64` | Minimum bytes before compressing an entry |
 
 #### Raw Query Format
@@ -207,7 +215,7 @@ console.log(result.changes); // 3
 
 ### PreparedStatement
 
-Prepared statements parse SQL once and reuse the cached execution plan on every call — no parsing or cache lookup overhead per execution.
+Prepared statements parse SQL once and reuse the cached execution plan on every call. No parsing or cache lookup overhead per execution.
 
 ```js
 const insert = db.prepare('INSERT INTO users VALUES ($1, $2, $3)');
@@ -230,8 +238,9 @@ All methods mirror `Database` but without the `sql` parameter (it's bound at pre
 | `queryOne(params?)` | `queryOneSync(params?)` | Query single row |
 | `queryRaw(params?)` | `queryRawSync(params?)` | Query in columnar format |
 | | `executeBatchSync(paramsArray)` | Execute with multiple param sets |
+| | `finalize()` | Release the prepared statement |
 
-Property: `sql` — returns the SQL text of this prepared statement.
+Property: `sql` returns the SQL text of this prepared statement.
 
 #### Async Prepared Statement
 
@@ -368,41 +377,66 @@ try {
 } catch (err) {
   console.error(err.message);
 }
-
-// Prepared statement — errors at prepare time for invalid SQL
-try {
-  db.prepare('INVALID SQL HERE');
-} catch (err) {
-  console.error(err.message);
-}
 ```
 
 ### Supported Types
 
-| JavaScript | Stoolap |
-|-----------|---------|
-| `number` (integer) | `INTEGER` |
-| `number` (float) | `FLOAT` |
-| `string` | `TEXT` |
-| `boolean` | `BOOLEAN` |
-| `null` / `undefined` | `NULL` |
-| `BigInt` | `INTEGER` |
-| `Date` | `TIMESTAMP` |
-| `Buffer` | `TEXT` (UTF-8) |
-| `Object` / `Array` | `JSON` (stringified) |
+| JavaScript | Stoolap | Notes |
+|-----------|---------|-------|
+| `number` (integer) | `INTEGER` | |
+| `number` (float) | `FLOAT` | |
+| `string` | `TEXT` | |
+| `boolean` | `BOOLEAN` | |
+| `null` / `undefined` | `NULL` | |
+| `BigInt` | `INTEGER` | |
+| `Date` | `TIMESTAMP` | |
+| `Float32Array` | `VECTOR(N)` | Returned as `Float32Array` |
+| `Buffer` | `TEXT` (UTF-8) | |
+| `Object` / `Array` | `JSON` (stringified) | |
+
+### Vector Support
+
+Stoolap supports native vector storage and similarity search. Vectors are returned as `Float32Array` and can be passed as `Float32Array` bind parameters.
+
+```js
+// Create a table with a vector column
+await db.exec('CREATE TABLE embeddings (id INTEGER PRIMARY KEY, vec VECTOR(3))');
+
+// Insert vectors via SQL string literals
+await db.execute("INSERT INTO embeddings VALUES (1, '[0.1, 0.2, 0.3]')");
+
+// Query: vectors are returned as Float32Array
+const row = await db.queryOne('SELECT vec FROM embeddings WHERE id = 1');
+console.log(row.vec);              // Float32Array(3) [0.1, 0.2, 0.3]
+console.log(row.vec instanceof Float32Array); // true
+
+// k-NN search with distance functions
+const nearest = await db.query(`
+  SELECT id, VEC_DISTANCE_L2(vec, '[0.15, 0.25, 0.35]') AS dist
+  FROM embeddings ORDER BY dist LIMIT 5
+`);
+
+// HNSW index for fast approximate nearest neighbor search
+await db.exec('CREATE INDEX idx ON embeddings(vec) USING HNSW');
+```
+
+Available distance functions: `VEC_DISTANCE_L2`, `VEC_DISTANCE_COSINE`, `VEC_DISTANCE_IP`.
+
+See the [Stoolap Vector Search docs](https://stoolap.io/docs/data-types/vector-search/) for full details on HNSW indexes, distance metrics, and configuration.
 
 ## Building from Source
 
 Requires:
-- [Rust](https://rustup.rs) (stable)
-- [Node.js](https://nodejs.org) >= 22 (with development headers)
-- C++ compiler (for V8 helpers)
+- [Node.js](https://nodejs.org) >= 18
+- C compiler (gcc, clang, or MSVC)
+- [node-gyp](https://github.com/nodejs/node-gyp) and its prerequisites
+
+The stoolap shared library (`libstoolap.dylib` / `libstoolap.so` / `stoolap.dll`) must be available, either via a platform package or built from the [Stoolap](https://github.com/stoolap/stoolap) repository.
 
 ```bash
 git clone https://github.com/stoolap/stoolap-node.git
 cd stoolap-node
 npm install
-npm run build
 npm test
 ```
 

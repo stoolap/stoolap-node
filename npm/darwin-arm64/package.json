@@ -1,28 +1,21 @@
 {
-  "name": "@stoolap/node-darwin-arm64",
-  "version": "0.3.3",
-  "cpu": [
-    "arm64"
-  ],
-  "main": "stoolap.darwin-arm64.node",
+  "name": "@stoolap/lib-darwin-arm64",
+  "version": "0.3.4",
+  "main": "libstoolap.dylib",
   "files": [
-    "stoolap.darwin-arm64.node"
+    "libstoolap.dylib"
   ],
-  "description": "High-performance Node.js driver for Stoolap embedded SQL database",
+  "description": "Stoolap shared library for macOS ARM64",
   "keywords": [
     "database",
     "sql",
     "embedded",
-    "mvcc",
-    "acid",
-    "stoolap",
-    "napi",
-    "native"
+    "stoolap"
   ],
   "homepage": "https://github.com/stoolap/stoolap-node",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">= 22"
+    "node": ">= 18"
   },
   "repository": {
     "type": "git",
@@ -33,5 +26,8 @@
   },
   "os": [
     "darwin"
+  ],
+  "cpu": [
+    "arm64"
   ]
 }

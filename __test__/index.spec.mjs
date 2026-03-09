@@ -89,8 +89,8 @@ describe('DDL and DML', () => {
       )
     `);
     const tables = await db.query('SHOW TABLES');
-    const tableNames = tables.map(t => t.table_name || t.Tables);
-    assert.ok(tableNames.some(n => n === 'users'));
+    const tableNames = tables.map((t) => t.table_name || t.Tables);
+    assert.ok(tableNames.some((n) => n === 'users'));
   });
 
   it('should execute multiple statements with exec', async () => {
@@ -99,21 +99,21 @@ describe('DDL and DML', () => {
       CREATE TABLE orders (id INTEGER PRIMARY KEY, item_id INTEGER)
     `);
     const tables = await db.query('SHOW TABLES');
-    const names = tables.map(t => t.table_name || t.Tables);
-    assert.ok(names.some(n => n === 'items'));
-    assert.ok(names.some(n => n === 'orders'));
+    const names = tables.map((t) => t.table_name || t.Tables);
+    assert.ok(names.some((n) => n === 'items'));
+    assert.ok(names.some((n) => n === 'orders'));
   });
 
   it('should insert with positional params and return changes', async () => {
     const r1 = await db.execute(
       'INSERT INTO users (id, name, age, email) VALUES ($1, $2, $3, $4)',
-      [1, 'Alice', 32, 'alice@example.com']
+      [1, 'Alice', 32, 'alice@example.com'],
     );
     assert.equal(r1.changes, 1);
 
     const r2 = await db.execute(
       'INSERT INTO users (id, name, age, email) VALUES ($1, $2, $3, $4)',
-      [2, 'Bob', 28, 'bob@example.com']
+      [2, 'Bob', 28, 'bob@example.com'],
     );
     assert.equal(r2.changes, 1);
   });
@@ -121,16 +121,13 @@ describe('DDL and DML', () => {
   it('should insert with named params', async () => {
     const r = await db.execute(
       'INSERT INTO users (id, name, age, email) VALUES (:id, :name, :age, :email)',
-      { id: 3, name: 'Charlie', age: 25, email: 'charlie@example.com' }
+      { id: 3, name: 'Charlie', age: 25, email: 'charlie@example.com' },
     );
     assert.equal(r.changes, 1);
   });
 
   it('should update rows and return changes count', async () => {
-    const r = await db.execute(
-      'UPDATE users SET age = $1 WHERE id = $2',
-      [33, 1]
-    );
+    const r = await db.execute('UPDATE users SET age = $1 WHERE id = $2', [33, 1]);
     assert.equal(r.changes, 1);
   });
 
@@ -160,7 +157,7 @@ describe('Queries', () => {
     `);
     await db.execute('INSERT INTO products VALUES ($1, $2, $3, $4)', [1, 'Widget', 9.99, true]);
     await db.execute('INSERT INTO products VALUES ($1, $2, $3, $4)', [2, 'Gadget', 29.99, true]);
-    await db.execute('INSERT INTO products VALUES ($1, $2, $3, $4)', [3, 'Doohickey', 4.50, false]);
+    await db.execute('INSERT INTO products VALUES ($1, $2, $3, $4)', [3, 'Doohickey', 4.5, false]);
   });
 
   after(async () => {
@@ -237,51 +234,33 @@ describe('Type conversions', () => {
   });
 
   it('should handle null values', async () => {
-    await db.execute(
-      'INSERT INTO types (id, int_val) VALUES ($1, $2)',
-      [1, null]
-    );
+    await db.execute('INSERT INTO types (id, int_val) VALUES ($1, $2)', [1, null]);
     const row = await db.queryOne('SELECT * FROM types WHERE id = $1', [1]);
     assert.equal(row.int_val, null);
     assert.equal(row.float_val, null);
   });
 
   it('should handle integer values', async () => {
-    await db.execute(
-      'INSERT INTO types (id, int_val) VALUES ($1, $2)',
-      [2, 42]
-    );
+    await db.execute('INSERT INTO types (id, int_val) VALUES ($1, $2)', [2, 42]);
     const row = await db.queryOne('SELECT int_val FROM types WHERE id = $1', [2]);
     assert.equal(row.int_val, 42);
   });
 
   it('should handle float values', async () => {
-    await db.execute(
-      'INSERT INTO types (id, float_val) VALUES ($1, $2)',
-      [3, 3.14]
-    );
+    await db.execute('INSERT INTO types (id, float_val) VALUES ($1, $2)', [3, 3.14]);
     const row = await db.queryOne('SELECT float_val FROM types WHERE id = $1', [3]);
     assert.ok(Math.abs(row.float_val - 3.14) < 0.001);
   });
 
   it('should handle text values', async () => {
-    await db.execute(
-      'INSERT INTO types (id, text_val) VALUES ($1, $2)',
-      [4, 'hello world']
-    );
+    await db.execute('INSERT INTO types (id, text_val) VALUES ($1, $2)', [4, 'hello world']);
     const row = await db.queryOne('SELECT text_val FROM types WHERE id = $1', [4]);
     assert.equal(row.text_val, 'hello world');
   });
 
   it('should handle boolean values', async () => {
-    await db.execute(
-      'INSERT INTO types (id, bool_val) VALUES ($1, $2)',
-      [5, true]
-    );
-    await db.execute(
-      'INSERT INTO types (id, bool_val) VALUES ($1, $2)',
-      [6, false]
-    );
+    await db.execute('INSERT INTO types (id, bool_val) VALUES ($1, $2)', [5, true]);
+    await db.execute('INSERT INTO types (id, bool_val) VALUES ($1, $2)', [6, false]);
     const r1 = await db.queryOne('SELECT bool_val FROM types WHERE id = $1', [5]);
     const r2 = await db.queryOne('SELECT bool_val FROM types WHERE id = $1', [6]);
     assert.equal(r1.bool_val, true);
@@ -290,10 +269,10 @@ describe('Type conversions', () => {
 
   it('should handle JSON values', async () => {
     const jsonObj = { key: 'value', nested: { a: 1 } };
-    await db.execute(
-      'INSERT INTO types (id, json_val) VALUES ($1, $2)',
-      [7, JSON.stringify(jsonObj)]
-    );
+    await db.execute('INSERT INTO types (id, json_val) VALUES ($1, $2)', [
+      7,
+      JSON.stringify(jsonObj),
+    ]);
     const row = await db.queryOne('SELECT json_val FROM types WHERE id = $1', [7]);
     assert.ok(row.json_val);
     const parsed = JSON.parse(row.json_val);
@@ -335,6 +314,17 @@ describe('PreparedStatement', () => {
     assert.equal(r2.changes, 1);
   });
 
+  it('should support named params with prepared statements', async () => {
+    const insert = db.prepare('INSERT INTO ps_test VALUES (:id, :val)');
+    const result = await insert.execute({ id: 10, val: 'named-async' });
+    assert.equal(result.changes, 1);
+
+    const select = db.prepare('SELECT * FROM ps_test WHERE val = :val');
+    const row = await select.queryOne({ val: 'named-async' });
+    assert.ok(row);
+    assert.equal(row.id, 10);
+  });
+
   it('should query with prepared statement', async () => {
     const stmt = db.prepare('SELECT * FROM ps_test WHERE id = $1');
     const rows = await stmt.query([1]);
@@ -353,7 +343,7 @@ describe('PreparedStatement', () => {
     const stmt = db.prepare('SELECT * FROM ps_test ORDER BY id');
     const raw = await stmt.queryRaw();
     assert.deepEqual(raw.columns, ['id', 'val']);
-    assert.equal(raw.rows.length, 2);
+    assert.equal(raw.rows.length, 3);
   });
 });
 
@@ -447,7 +437,7 @@ describe('Error handling', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 
@@ -457,7 +447,7 @@ describe('Error handling', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 
@@ -468,7 +458,7 @@ describe('Error handling', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 
@@ -478,7 +468,7 @@ describe('Error handling', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 });
@@ -514,7 +504,7 @@ describe('Advanced queries', () => {
 
   it('should handle GROUP BY with aggregates', async () => {
     const rows = await db.query(
-      'SELECT dept, COUNT(*) AS cnt, AVG(salary) AS avg_sal FROM employees GROUP BY dept ORDER BY dept'
+      'SELECT dept, COUNT(*) AS cnt, AVG(salary) AS avg_sal FROM employees GROUP BY dept ORDER BY dept',
     );
     assert.equal(rows.length, 3);
     assert.equal(rows[0].dept, 'Engineering');
@@ -522,26 +512,23 @@ describe('Advanced queries', () => {
   });
 
   it('should handle ORDER BY and LIMIT', async () => {
-    const rows = await db.query(
-      'SELECT name FROM employees ORDER BY salary DESC LIMIT $1',
-      [3]
-    );
+    const rows = await db.query('SELECT name FROM employees ORDER BY salary DESC LIMIT $1', [3]);
     assert.equal(rows.length, 3);
     assert.equal(rows[0].name, 'Alice');
   });
 
   it('should handle subqueries', async () => {
     const rows = await db.query(
-      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees) ORDER BY name'
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees) ORDER BY name',
     );
     assert.ok(rows.length > 0);
   });
 
   it('should handle JOINs', async () => {
     await db.exec('CREATE TABLE departments (id INTEGER PRIMARY KEY, name TEXT, location TEXT)');
-    await db.execute("INSERT INTO departments VALUES ($1, $2, $3)", [1, 'Engineering', 'SF']);
-    await db.execute("INSERT INTO departments VALUES ($1, $2, $3)", [2, 'Sales', 'NYC']);
-    await db.execute("INSERT INTO departments VALUES ($1, $2, $3)", [3, 'HR', 'SF']);
+    await db.execute('INSERT INTO departments VALUES ($1, $2, $3)', [1, 'Engineering', 'SF']);
+    await db.execute('INSERT INTO departments VALUES ($1, $2, $3)', [2, 'Sales', 'NYC']);
+    await db.execute('INSERT INTO departments VALUES ($1, $2, $3)', [3, 'HR', 'SF']);
 
     const rows = await db.query(`
       SELECT e.name, d.location
@@ -590,6 +577,32 @@ describe('Concurrency', () => {
 
     await db.close();
   });
+
+  it('should keep the event loop responsive during async queries', async () => {
+    const db = await Database.open(':memory:');
+    await db.exec('CREATE TABLE conc_slow (id INTEGER PRIMARY KEY, val INTEGER)');
+
+    const stmt = db.prepare('INSERT INTO conc_slow VALUES ($1, $2)');
+    for (let i = 0; i < 2500; i++) {
+      stmt.executeSync([i, i]);
+    }
+
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 10);
+
+    try {
+      const rows = await db.query('SELECT COUNT(*) AS cnt FROM conc_slow a, conc_slow b');
+      assert.equal(rows.length, 1);
+      assert.ok(rows[0].cnt > 0);
+    } finally {
+      clearInterval(timer);
+      await db.close();
+    }
+
+    assert.ok(ticks > 0, 'expected timers to keep firing while async query was running');
+  });
 });
 
 // ============================================================
@@ -617,22 +630,23 @@ describe('Sync methods', () => {
   it('should execSync create tables', () => {
     db.execSync('CREATE TABLE sync_extra (id INTEGER PRIMARY KEY, val TEXT)');
     const tables = db.querySync('SHOW TABLES');
-    const names = tables.map(t => t.table_name || t.Tables);
-    assert.ok(names.some(n => n === 'sync_extra'));
+    const names = tables.map((t) => t.table_name || t.Tables);
+    assert.ok(names.some((n) => n === 'sync_extra'));
   });
 
   it('should executeSync with positional params', () => {
-    const r = db.executeSync(
-      'INSERT INTO sync_test (id, name, score) VALUES ($1, $2, $3)',
-      [1, 'Alice', 95.5]
-    );
+    const r = db.executeSync('INSERT INTO sync_test (id, name, score) VALUES ($1, $2, $3)', [
+      1,
+      'Alice',
+      95.5,
+    ]);
     assert.equal(r.changes, 1);
   });
 
   it('should executeSync with named params', () => {
     const r = db.executeSync(
       'INSERT INTO sync_test (id, name, score) VALUES (:id, :name, :score)',
-      { id: 2, name: 'Bob', score: 87.3 }
+      { id: 2, name: 'Bob', score: 87.3 },
     );
     assert.equal(r.changes, 1);
   });
@@ -651,10 +665,7 @@ describe('Sync methods', () => {
   });
 
   it('should querySync with named params', () => {
-    const rows = db.querySync(
-      'SELECT * FROM sync_test WHERE name = :name',
-      { name: 'Bob' }
-    );
+    const rows = db.querySync('SELECT * FROM sync_test WHERE name = :name', { name: 'Bob' });
     assert.equal(rows.length, 1);
     assert.equal(rows[0].id, 2);
   });
@@ -672,10 +683,7 @@ describe('Sync methods', () => {
   });
 
   it('should queryOneSync with named params', () => {
-    const row = db.queryOneSync(
-      'SELECT * FROM sync_test WHERE id = :id',
-      { id: 2 }
-    );
+    const row = db.queryOneSync('SELECT * FROM sync_test WHERE id = :id', { id: 2 });
     assert.ok(row);
     assert.equal(row.name, 'Bob');
   });
@@ -689,10 +697,7 @@ describe('Sync methods', () => {
   });
 
   it('should queryRawSync with named params', () => {
-    const raw = db.queryRawSync(
-      'SELECT id, name FROM sync_test WHERE score > :min',
-      { min: 90.0 }
-    );
+    const raw = db.queryRawSync('SELECT id, name FROM sync_test WHERE score > :min', { min: 90.0 });
     assert.equal(raw.rows.length, 1);
     assert.deepEqual(raw.rows[0], [1, 'Alice']);
   });
@@ -721,14 +726,11 @@ describe('Batch execution', () => {
   });
 
   it('should executeBatchSync insert multiple rows', () => {
-    const result = db.executeBatchSync(
-      'INSERT INTO batch_test VALUES ($1, $2, $3)',
-      [
-        [1, 'Alice', 10],
-        [2, 'Bob', 20],
-        [3, 'Charlie', 30],
-      ]
-    );
+    const result = db.executeBatchSync('INSERT INTO batch_test VALUES ($1, $2, $3)', [
+      [1, 'Alice', 10],
+      [2, 'Bob', 20],
+      [3, 'Charlie', 30],
+    ]);
     assert.equal(result.changes, 3);
 
     const rows = db.querySync('SELECT * FROM batch_test ORDER BY id');
@@ -738,25 +740,18 @@ describe('Batch execution', () => {
   });
 
   it('should executeBatchSync with single param set', () => {
-    const result = db.executeBatchSync(
-      'INSERT INTO batch_test VALUES ($1, $2, $3)',
-      [[4, 'Diana', 40]]
-    );
+    const result = db.executeBatchSync('INSERT INTO batch_test VALUES ($1, $2, $3)', [
+      [4, 'Diana', 40],
+    ]);
     assert.equal(result.changes, 1);
   });
 
   it('should executeBatchSync for deletes', () => {
-    db.executeBatchSync(
-      'INSERT INTO batch_test VALUES ($1, $2, $3)',
-      [
-        [100, 'del-a', 0],
-        [101, 'del-b', 0],
-      ]
-    );
-    const result = db.executeBatchSync(
-      'DELETE FROM batch_test WHERE id = $1',
-      [[100], [101]]
-    );
+    db.executeBatchSync('INSERT INTO batch_test VALUES ($1, $2, $3)', [
+      [100, 'del-a', 0],
+      [101, 'del-b', 0],
+    ]);
+    const result = db.executeBatchSync('DELETE FROM batch_test WHERE id = $1', [[100], [101]]);
     assert.equal(result.changes, 2);
   });
 });
@@ -826,6 +821,17 @@ describe('PreparedStatement sync', () => {
     assert.equal(rows.length, 6);
   });
 
+  it('should support named params with prepared statements synchronously', () => {
+    const insert = db.prepare('INSERT INTO ps_sync VALUES (:id, :name, :active)');
+    const result = insert.executeSync({ id: 20, name: 'NamedSync', active: true });
+    assert.equal(result.changes, 1);
+
+    const select = db.prepare('SELECT * FROM ps_sync WHERE name = :name');
+    const row = select.queryOneSync({ name: 'NamedSync' });
+    assert.ok(row);
+    assert.equal(row.id, 20);
+  });
+
   it('should expose sql property', () => {
     const stmt = db.prepare('SELECT * FROM ps_sync WHERE id = $1');
     assert.equal(stmt.sql, 'SELECT * FROM ps_sync WHERE id = $1');
@@ -837,7 +843,7 @@ describe('PreparedStatement sync', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 });
@@ -908,14 +914,11 @@ describe('Transaction sync', () => {
 
   it('should executeBatchSync within transaction', () => {
     const tx = db.beginSync();
-    const result = tx.executeBatchSync(
-      'INSERT INTO tx_sync VALUES ($1, $2)',
-      [
-        [10, 'batch-a'],
-        [11, 'batch-b'],
-        [12, 'batch-c'],
-      ]
-    );
+    const result = tx.executeBatchSync('INSERT INTO tx_sync VALUES ($1, $2)', [
+      [10, 'batch-a'],
+      [11, 'batch-b'],
+      [12, 'batch-c'],
+    ]);
     assert.equal(result.changes, 3);
     tx.commitSync();
 
@@ -943,7 +946,7 @@ describe('Transaction async queryRaw', () => {
     assert.deepEqual(raw.columns, ['id', 'val']);
     assert.equal(raw.rows.length, 2);
     // Verify both rows exist (order may vary within transaction)
-    const ids = raw.rows.map(r => r[0]).sort();
+    const ids = raw.rows.map((r) => r[0]).sort();
     assert.deepEqual(ids, [1, 2]);
 
     await tx.commit();
@@ -968,18 +971,24 @@ describe('Named parameters', () => {
         score FLOAT
       )
     `);
-    await db.execute(
-      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
-      { id: 1, name: 'Alice', city: 'NYC', score: 95.0 }
-    );
-    await db.execute(
-      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
-      { id: 2, name: 'Bob', city: 'SF', score: 88.5 }
-    );
-    await db.execute(
-      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
-      { id: 3, name: 'Charlie', city: 'NYC', score: 72.0 }
-    );
+    await db.execute('INSERT INTO named_test VALUES (:id, :name, :city, :score)', {
+      id: 1,
+      name: 'Alice',
+      city: 'NYC',
+      score: 95.0,
+    });
+    await db.execute('INSERT INTO named_test VALUES (:id, :name, :city, :score)', {
+      id: 2,
+      name: 'Bob',
+      city: 'SF',
+      score: 88.5,
+    });
+    await db.execute('INSERT INTO named_test VALUES (:id, :name, :city, :score)', {
+      id: 3,
+      name: 'Charlie',
+      city: 'NYC',
+      score: 72.0,
+    });
   });
 
   after(async () => {
@@ -987,20 +996,16 @@ describe('Named parameters', () => {
   });
 
   it('should query with named params', async () => {
-    const rows = await db.query(
-      'SELECT * FROM named_test WHERE city = :city ORDER BY id',
-      { city: 'NYC' }
-    );
+    const rows = await db.query('SELECT * FROM named_test WHERE city = :city ORDER BY id', {
+      city: 'NYC',
+    });
     assert.equal(rows.length, 2);
     assert.equal(rows[0].name, 'Alice');
     assert.equal(rows[1].name, 'Charlie');
   });
 
   it('should queryOne with named params', async () => {
-    const row = await db.queryOne(
-      'SELECT * FROM named_test WHERE name = :name',
-      { name: 'Bob' }
-    );
+    const row = await db.queryOne('SELECT * FROM named_test WHERE name = :name', { name: 'Bob' });
     assert.ok(row);
     assert.equal(row.city, 'SF');
   });
@@ -1008,7 +1013,7 @@ describe('Named parameters', () => {
   it('should queryRaw with named params', async () => {
     const raw = await db.queryRaw(
       'SELECT id, name FROM named_test WHERE score > :min ORDER BY id',
-      { min: 80.0 }
+      { min: 80.0 },
     );
     assert.deepEqual(raw.columns, ['id', 'name']);
     assert.equal(raw.rows.length, 2);
@@ -1016,37 +1021,40 @@ describe('Named parameters', () => {
   });
 
   it('should update with named params', async () => {
-    const r = await db.execute(
-      'UPDATE named_test SET score = :score WHERE name = :name',
-      { score: 99.0, name: 'Charlie' }
-    );
+    const r = await db.execute('UPDATE named_test SET score = :score WHERE name = :name', {
+      score: 99.0,
+      name: 'Charlie',
+    });
     assert.equal(r.changes, 1);
     const row = await db.queryOne('SELECT score FROM named_test WHERE id = $1', [3]);
     assert.equal(row.score, 99.0);
   });
 
   it('should delete with named params', async () => {
-    await db.execute(
-      'INSERT INTO named_test VALUES (:id, :name, :city, :score)',
-      { id: 99, name: 'Temp', city: 'X', score: 0 }
-    );
-    const r = await db.execute(
-      'DELETE FROM named_test WHERE id = :id',
-      { id: 99 }
-    );
+    await db.execute('INSERT INTO named_test VALUES (:id, :name, :city, :score)', {
+      id: 99,
+      name: 'Temp',
+      city: 'X',
+      score: 0,
+    });
+    const r = await db.execute('DELETE FROM named_test WHERE id = :id', { id: 99 });
     assert.equal(r.changes, 1);
+  });
+
+  it('should not rewrite named params inside SQL string literals', async () => {
+    const row = await db.queryOne("SELECT ':city' AS literal_value, :city AS bound_value", {
+      city: 'NYC',
+    });
+    assert.deepEqual(row, {
+      literal_value: ':city',
+      bound_value: 'NYC',
+    });
   });
 
   it('should use positional params in async transaction', async () => {
     const tx = await db.begin();
-    await tx.execute(
-      'INSERT INTO named_test VALUES ($1, $2, $3, $4)',
-      [50, 'TxPos', 'LA', 50.0]
-    );
-    const row = await tx.queryOne(
-      'SELECT * FROM named_test WHERE id = $1',
-      [50]
-    );
+    await tx.execute('INSERT INTO named_test VALUES ($1, $2, $3, $4)', [50, 'TxPos', 'LA', 50.0]);
+    const row = await tx.queryOne('SELECT * FROM named_test WHERE id = $1', [50]);
     assert.ok(row);
     assert.equal(row.name, 'TxPos');
     await tx.rollback();
@@ -1054,14 +1062,8 @@ describe('Named parameters', () => {
 
   it('should use positional params in sync transaction', () => {
     const tx = db.beginSync();
-    tx.executeSync(
-      'INSERT INTO named_test VALUES ($1, $2, $3, $4)',
-      [51, 'SyncPos', 'CHI', 60.0]
-    );
-    const row = tx.queryOneSync(
-      'SELECT * FROM named_test WHERE name = $1',
-      ['SyncPos']
-    );
+    tx.executeSync('INSERT INTO named_test VALUES ($1, $2, $3, $4)', [51, 'SyncPos', 'CHI', 60.0]);
+    const row = tx.queryOneSync('SELECT * FROM named_test WHERE name = $1', ['SyncPos']);
     assert.ok(row);
     assert.equal(row.city, 'CHI');
     tx.rollbackSync();
@@ -1095,29 +1097,20 @@ describe('Extended type conversions', () => {
   });
 
   it('should handle undefined as NULL', async () => {
-    await db.execute(
-      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
-      [1, undefined]
-    );
+    await db.execute('INSERT INTO ext_types (id, text_val) VALUES ($1, $2)', [1, undefined]);
     const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [1]);
     assert.equal(row.text_val, null);
   });
 
   it('should handle BigInt parameter', async () => {
-    await db.execute(
-      'INSERT INTO ext_types (id, int_val) VALUES ($1, $2)',
-      [2, BigInt(123456789)]
-    );
+    await db.execute('INSERT INTO ext_types (id, int_val) VALUES ($1, $2)', [2, BigInt(123456789)]);
     const row = await db.queryOne('SELECT int_val FROM ext_types WHERE id = $1', [2]);
     assert.equal(row.int_val, 123456789);
   });
 
   it('should handle Date parameter as TIMESTAMP', async () => {
     const date = new Date('2025-06-15T10:30:00Z');
-    await db.execute(
-      'INSERT INTO ext_types (id, ts_val) VALUES ($1, $2)',
-      [3, date]
-    );
+    await db.execute('INSERT INTO ext_types (id, ts_val) VALUES ($1, $2)', [3, date]);
     const row = await db.queryOne('SELECT ts_val FROM ext_types WHERE id = $1', [3]);
     assert.ok(row.ts_val);
     // Verify the timestamp round-trips (string or Date)
@@ -1130,17 +1123,17 @@ describe('Extended type conversions', () => {
   it('should handle negative numbers', async () => {
     await db.execute(
       'INSERT INTO ext_types (id, int_val, float_val) VALUES ($1, $2, $3)',
-      [4, -42, -3.14]
+      [4, -42, -3.14],
     );
     const row = await db.queryOne('SELECT int_val, float_val FROM ext_types WHERE id = $1', [4]);
     assert.equal(row.int_val, -42);
-    assert.ok(Math.abs(row.float_val - (-3.14)) < 0.001);
+    assert.ok(Math.abs(row.float_val - -3.14) < 0.001);
   });
 
   it('should handle zero values', async () => {
     await db.execute(
       'INSERT INTO ext_types (id, int_val, float_val) VALUES ($1, $2, $3)',
-      [5, 0, 0.0]
+      [5, 0, 0.0],
     );
     const row = await db.queryOne('SELECT int_val, float_val FROM ext_types WHERE id = $1', [5]);
     assert.equal(row.int_val, 0);
@@ -1148,40 +1141,28 @@ describe('Extended type conversions', () => {
   });
 
   it('should handle empty string', async () => {
-    await db.execute(
-      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
-      [6, '']
-    );
+    await db.execute('INSERT INTO ext_types (id, text_val) VALUES ($1, $2)', [6, '']);
     const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [6]);
     assert.equal(row.text_val, '');
   });
 
   it('should handle unicode text', async () => {
     const unicode = '日本語テスト 🎉 émojis àccénts';
-    await db.execute(
-      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
-      [7, unicode]
-    );
+    await db.execute('INSERT INTO ext_types (id, text_val) VALUES ($1, $2)', [7, unicode]);
     const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [7]);
     assert.equal(row.text_val, unicode);
   });
 
   it('should handle very long text', async () => {
     const longText = 'x'.repeat(100000);
-    await db.execute(
-      'INSERT INTO ext_types (id, text_val) VALUES ($1, $2)',
-      [8, longText]
-    );
+    await db.execute('INSERT INTO ext_types (id, text_val) VALUES ($1, $2)', [8, longText]);
     const row = await db.queryOne('SELECT text_val FROM ext_types WHERE id = $1', [8]);
     assert.equal(row.text_val.length, 100000);
   });
 
   it('should handle Object parameter as JSON', async () => {
     const obj = { users: [{ name: 'Alice' }, { name: 'Bob' }], count: 2 };
-    await db.execute(
-      'INSERT INTO ext_types (id, json_val) VALUES ($1, $2)',
-      [9, obj]
-    );
+    await db.execute('INSERT INTO ext_types (id, json_val) VALUES ($1, $2)', [9, obj]);
     const row = await db.queryOne('SELECT json_val FROM ext_types WHERE id = $1', [9]);
     const parsed = JSON.parse(row.json_val);
     assert.equal(parsed.count, 2);
@@ -1190,10 +1171,7 @@ describe('Extended type conversions', () => {
 
   it('should handle Array parameter as JSON', async () => {
     const arr = [1, 'two', { three: 3 }];
-    await db.execute(
-      'INSERT INTO ext_types (id, json_val) VALUES ($1, $2)',
-      [10, arr]
-    );
+    await db.execute('INSERT INTO ext_types (id, json_val) VALUES ($1, $2)', [10, arr]);
     const row = await db.queryOne('SELECT json_val FROM ext_types WHERE id = $1', [10]);
     const parsed = JSON.parse(row.json_val);
     assert.equal(parsed.length, 3);
@@ -1251,14 +1229,11 @@ describe('Persistence', () => {
     try {
       const db = await Database.open(dbPath);
       db.execSync('CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)');
-      db.executeBatchSync(
-        'INSERT INTO items VALUES ($1, $2)',
-        [
-          [1, 'alpha'],
-          [2, 'beta'],
-          [3, 'gamma'],
-        ]
-      );
+      db.executeBatchSync('INSERT INTO items VALUES ($1, $2)', [
+        [1, 'alpha'],
+        [2, 'beta'],
+        [3, 'gamma'],
+      ]);
       await db.close();
 
       const db2 = await Database.open(dbPath);
@@ -1355,7 +1330,7 @@ describe('Error handling extended', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 
@@ -1365,7 +1340,7 @@ describe('Error handling extended', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 
@@ -1375,7 +1350,7 @@ describe('Error handling extended', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 
@@ -1385,7 +1360,7 @@ describe('Error handling extended', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 
@@ -1395,7 +1370,7 @@ describe('Error handling extended', () => {
       (err) => {
         assert.ok(err.message.length > 0);
         return true;
-      }
+      },
     );
   });
 });
@@ -1483,8 +1458,8 @@ describe('Edge cases', () => {
   it('should handle exec with trailing semicolons and whitespace', async () => {
     await db.exec('  CREATE TABLE ws_test (id INTEGER PRIMARY KEY)  ;  ;  ');
     const tables = await db.query('SHOW TABLES');
-    const names = tables.map(t => t.table_name || t.Tables);
-    assert.ok(names.some(n => n === 'ws_test'));
+    const names = tables.map((t) => t.table_name || t.Tables);
+    assert.ok(names.some((n) => n === 'ws_test'));
   });
 });
 
@@ -1506,13 +1481,13 @@ describe('Vector support', () => {
   it('should create table with VECTOR column', async () => {
     await db.exec('CREATE TABLE embeddings (id INTEGER PRIMARY KEY, embedding VECTOR(3))');
     const tables = await db.query('SHOW TABLES');
-    const names = tables.map(t => t.table_name || t.Tables);
-    assert.ok(names.some(n => n === 'embeddings'));
+    const names = tables.map((t) => t.table_name || t.Tables);
+    assert.ok(names.some((n) => n === 'embeddings'));
   });
 
   it('should insert vectors via SQL string literals', async () => {
     const result = await db.execute(
-      "INSERT INTO embeddings (id, embedding) VALUES (1, '[0.1, 0.2, 0.3]')"
+      "INSERT INTO embeddings (id, embedding) VALUES (1, '[0.1, 0.2, 0.3]')",
     );
     assert.equal(result.changes, 1);
   });
@@ -1569,14 +1544,14 @@ describe('Vector support', () => {
   });
 
   it('should handle NULL vectors', async () => {
-    await db.execute("INSERT INTO embeddings (id, embedding) VALUES (4, NULL)");
+    await db.execute('INSERT INTO embeddings (id, embedding) VALUES (4, NULL)');
     const row = await db.queryOne('SELECT embedding FROM embeddings WHERE id = 4');
     assert.equal(row.embedding, null);
   });
 
   it('should compute L2 distance', async () => {
     const rows = await db.query(
-      "SELECT id, VEC_DISTANCE_L2(embedding, '[0.1, 0.2, 0.3]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist"
+      "SELECT id, VEC_DISTANCE_L2(embedding, '[0.1, 0.2, 0.3]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist",
     );
     assert.equal(rows.length, 3);
     // id=1 has the same vector, distance should be ~0
@@ -1586,7 +1561,7 @@ describe('Vector support', () => {
 
   it('should compute cosine distance', async () => {
     const rows = await db.query(
-      "SELECT id, VEC_DISTANCE_COSINE(embedding, '[0.1, 0.2, 0.3]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist"
+      "SELECT id, VEC_DISTANCE_COSINE(embedding, '[0.1, 0.2, 0.3]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist",
     );
     assert.equal(rows.length, 3);
     assert.equal(rows[0].id, 1);
@@ -1595,7 +1570,7 @@ describe('Vector support', () => {
 
   it('should support k-NN search with ORDER BY + LIMIT', async () => {
     const rows = await db.query(
-      "SELECT id, VEC_DISTANCE_L2(embedding, '[0.4, 0.5, 0.6]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist LIMIT 2"
+      "SELECT id, VEC_DISTANCE_L2(embedding, '[0.4, 0.5, 0.6]') AS dist FROM embeddings WHERE id <= 3 ORDER BY dist LIMIT 2",
     );
     assert.equal(rows.length, 2);
     // id=2 has exact match [0.4, 0.5, 0.6]
@@ -1619,7 +1594,7 @@ describe('Vector support', () => {
     await db.execute("INSERT INTO vec_params (id, vec) VALUES (1, '[1.0, 2.0, 3.0]')");
     // Use Float32Array in distance computation param
     const row = db.queryOneSync(
-      "SELECT VEC_DISTANCE_L2(vec, '[1.0, 2.0, 3.0]') AS dist FROM vec_params WHERE id = 1"
+      "SELECT VEC_DISTANCE_L2(vec, '[1.0, 2.0, 3.0]') AS dist FROM vec_params WHERE id = 1",
     );
     assert.ok(row.dist < 0.001);
   });
@@ -1639,14 +1614,16 @@ describe('Vector support', () => {
   });
 
   it('should support VEC_DIMS utility function', async () => {
-    const row = await db.queryOne('SELECT VEC_DIMS(embedding) AS dims FROM embeddings WHERE id = 1');
+    const row = await db.queryOne(
+      'SELECT VEC_DIMS(embedding) AS dims FROM embeddings WHERE id = 1',
+    );
     assert.equal(row.dims, 3);
   });
 
   it('should reject wrong dimension count on insert', async () => {
     await assert.rejects(
       db.execute("INSERT INTO embeddings (id, embedding) VALUES (99, '[0.1, 0.2]')"),
-      /dimension|mismatch|expected/i
+      /dimension|mismatch|expected/i,
     );
   });
 
@@ -1657,9 +1634,22 @@ describe('Vector support', () => {
     await db.execute("INSERT INTO hnsw_test (id, vec) VALUES (3, '[0.7, 0.8, 0.9]')");
     await db.exec('CREATE INDEX idx_hnsw ON hnsw_test(vec) USING HNSW');
     const rows = await db.query(
-      "SELECT id, VEC_DISTANCE_L2(vec, '[0.4, 0.5, 0.6]') AS dist FROM hnsw_test ORDER BY dist LIMIT 2"
+      "SELECT id, VEC_DISTANCE_L2(vec, '[0.4, 0.5, 0.6]') AS dist FROM hnsw_test ORDER BY dist LIMIT 2",
     );
     assert.equal(rows.length, 2);
     assert.equal(rows[0].id, 2);
+  });
+});
+
+// ============================================================
+// Declaration coverage
+// ============================================================
+
+describe('Type declarations', () => {
+  it('should expose sync runtime helpers in index.d.ts', () => {
+    const dts = fs.readFileSync(path.join(process.cwd(), 'index.d.ts'), 'utf8');
+    assert.match(dts, /static openSync\s*\(/);
+    assert.match(dts, /closeSync\s*\(\): void/);
+    assert.match(dts, /finalize\s*\(\): void/);
   });
 });

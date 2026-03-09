@@ -1,17 +1,17 @@
-# Rust
-target/
-
 # Node.js
 node_modules/
 
+# Build output
+build/
+
 # Native binaries
 *.node
-
-# npm platform packages - only ignore built binaries
 npm/*/*.node
 
-# Profiling scripts
-profile.mjs
+# Local shared library
+libstoolap.dylib
+libstoolap.so
+stoolap.dll
 
 # OS
 .DS_Store

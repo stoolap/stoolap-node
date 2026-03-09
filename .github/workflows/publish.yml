@@ -8,6 +8,9 @@ permissions:
   contents: write
   id-token: write
 
+env:
+  STOOLAP_ENGINE_REF: v0.3.4
+
 jobs:
   build:
     strategy:
@@ -16,51 +19,56 @@ jobs:
         settings:
           - host: macos-latest
             target: aarch64-apple-darwin
-            build: npx napi build --platform --release --no-dts-header --target aarch64-apple-darwin
+            lib: libstoolap.dylib
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: npx napi build --platform --release --no-dts-header --target x86_64-apple-darwin
+            lib: libstoolap.dylib
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: npx napi build --platform --release --no-dts-header --target x86_64-unknown-linux-gnu
+            lib: libstoolap.so
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: |
-              sudo apt-get update
-              sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-              export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-              export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
-              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-              npx napi build --platform --release --no-dts-header --target aarch64-unknown-linux-gnu
+            lib: libstoolap.so
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: npx napi build --platform --release --no-dts-header --target x86_64-pc-windows-msvc
+            lib: stoolap.dll
 
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      - name: Clone stoolap engine
+        run: git clone --depth 1 --branch ${{ env.STOOLAP_ENGINE_REF }} https://github.com/stoolap/stoolap.git stoolap-engine
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
 
-      - name: Install dependencies
-        run: npm install
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stoolap-engine
+          key: ${{ matrix.settings.target }}
 
-      - name: Build native addon
-        run: ${{ matrix.settings.build }}
+      - name: Install cross-compilation tools
+        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Upload artifact
+      - name: Build stoolap shared library
+        working-directory: stoolap-engine
+        run: cargo build --release --features ffi --target ${{ matrix.settings.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Upload shared library
         uses: actions/upload-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
-          path: '*.node'
+          name: lib-${{ matrix.settings.target }}
+          path: stoolap-engine/target/${{ matrix.settings.target }}/release/${{ matrix.settings.lib }}
           if-no-files-found: error
 
   publish:
@@ -75,45 +83,55 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - name: Install dependencies
-        run: npm install
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Move artifacts to project root
+      - name: Copy shared libraries into platform packages
+        shell: bash
         run: |
-          for dir in artifacts/bindings-*/; do
-            cp "$dir"*.node .
+          declare -A TARGETS=(
+            ["aarch64-apple-darwin"]="darwin-arm64/libstoolap.dylib"
+            ["x86_64-apple-darwin"]="darwin-x64/libstoolap.dylib"
+            ["x86_64-unknown-linux-gnu"]="linux-x64-gnu/libstoolap.so"
+            ["aarch64-unknown-linux-gnu"]="linux-arm64-gnu/libstoolap.so"
+            ["x86_64-pc-windows-msvc"]="win32-x64-msvc/stoolap.dll"
+          )
+
+          for target in "${!TARGETS[@]}"; do
+            dest="npm/${TARGETS[$target]}"
+            src=$(ls artifacts/lib-${target}/*)
+            echo "Copying $src -> $dest"
+            cp "$src" "$dest"
           done
-          ls -la *.node
 
-      - name: Copy artifacts into platform packages
-        run: npx napi artifacts --output-dir . --npm-dir npm
-
-      - name: Update platform package versions
-        run: npx napi version
-
-      - name: Sync optionalDependencies versions
+      - name: Sync platform package versions
         run: |
           node -e "
             const fs = require('fs');
+            const path = require('path');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             const ver = pkg.version;
-            let changed = false;
+
+            // Sync optionalDependencies
             for (const dep of Object.keys(pkg.optionalDependencies || {})) {
-              if (pkg.optionalDependencies[dep] !== ver) {
-                pkg.optionalDependencies[dep] = ver;
-                changed = true;
-              }
+              pkg.optionalDependencies[dep] = ver;
             }
-            if (changed) {
-              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-              console.log('Updated optionalDependencies to version ' + ver);
-            } else {
-              console.log('optionalDependencies already at version ' + ver);
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+
+            // Sync platform package versions
+            const dirs = fs.readdirSync('npm', { withFileTypes: true })
+              .filter(d => d.isDirectory())
+              .map(d => d.name);
+            for (const dir of dirs) {
+              const p = path.join('npm', dir, 'package.json');
+              if (fs.existsSync(p)) {
+                const ppkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+                ppkg.version = ver;
+                fs.writeFileSync(p, JSON.stringify(ppkg, null, 2) + '\n');
+                console.log('Updated ' + p + ' to v' + ver);
+              }
             }
           "
 
@@ -144,4 +162,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: '*.node'
