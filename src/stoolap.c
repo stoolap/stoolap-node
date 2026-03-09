@@ -15,9 +15,11 @@
 
 #ifdef _WIN32
   #include <windows.h>
+  #include <malloc.h>
   #define DLOPEN(path)       LoadLibraryA(path)
   #define DLSYM(lib, name)   GetProcAddress(lib, name)
   #define DLERROR()          "LoadLibrary failed"
+  #define alloca             _alloca
   typedef HMODULE LibHandle;
 #else
   #include <dlfcn.h>
@@ -34,10 +36,10 @@ typedef struct StoolapStmt  StoolapStmt;
 typedef struct StoolapTx    StoolapTx;
 typedef struct StoolapRows  StoolapRows;
 
-#define S_OK    0
-#define S_ERR   1
-#define S_ROW   100
-#define S_DONE  101
+#define STOOLAP_OK    0
+#define STOOLAP_ERR   1
+#define STOOLAP_ROW   100
+#define STOOLAP_DONE  101
 
 #define T_NULL      0
 #define T_INTEGER   1
@@ -660,7 +662,7 @@ static napi_value fetch_as_arraybuffer(napi_env env, StoolapRows* rows) {
   int32_t rc = S.rows_fetch_all(rows, &buf, &buf_len);
   S.rows_close(rows);
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     if (buf) S.buffer_free(buf, buf_len);
     napi_value null_val;
     napi_get_null(env, &null_val);
@@ -799,7 +801,7 @@ static napi_value fetch_result(napi_env env, StoolapRows* rows) {
   int32_t rc = S.rows_fetch_all(rows, &buf, &buf_len);
   S.rows_close(rows);
 
-  if (rc != S_OK || !buf || buf_len == 0) {
+  if (rc != STOOLAP_OK || !buf || buf_len == 0) {
     if (buf) S.buffer_free(buf, buf_len);
     napi_value empty;
     napi_create_array_with_length(env, 0, &empty);
@@ -881,7 +883,7 @@ static napi_value fetch_result(napi_env env, StoolapRows* rows) {
  */
 static napi_value fetch_one(napi_env env, StoolapRows* rows) {
   int32_t rc = S.rows_next(rows);
-  if (rc != S_ROW) {
+  if (rc != STOOLAP_ROW) {
     S.rows_close(rows);
     napi_value null_val;
     napi_get_null(env, &null_val);
@@ -922,7 +924,7 @@ static napi_value fetch_one(napi_env env, StoolapRows* rows) {
  */
 static napi_value fetch_one_direct_cached(napi_env env, StoolapRows* rows, CachedStmt* cs) {
   int32_t rc = S.rows_next(rows);
-  if (rc != S_ROW) {
+  if (rc != STOOLAP_ROW) {
     S.rows_close(rows);
     napi_value null_val;
     napi_get_null(env, &null_val);
@@ -982,7 +984,7 @@ static napi_value fetch_result_cached(napi_env env, StoolapRows* rows, CachedStm
   int32_t rc = S.rows_fetch_all(rows, &buf, &buf_len);
   S.rows_close(rows);
 
-  if (rc != S_OK || !buf || buf_len == 0) {
+  if (rc != STOOLAP_OK || !buf || buf_len == 0) {
     if (buf) S.buffer_free(buf, buf_len);
     napi_value empty;
     napi_create_array_with_length(env, 0, &empty);
@@ -1225,7 +1227,7 @@ static void execute_db_open_async(napi_env env, void* data) {
     rc = S.open(task->dsn, &task->db);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     task->base.error = dup_cstr(S.errmsg(NULL), "Failed to open database");
   }
 }
@@ -1282,7 +1284,7 @@ static void complete_db_close_async(napi_env env, napi_status status, void* data
 static void execute_async_exec(napi_env env, void* data) {
   (void)env;
   AsyncExecTask* task = (AsyncExecTask*)data;
-  int32_t rc = S_ERR;
+  int32_t rc = STOOLAP_ERR;
 
   switch (task->kind) {
     case ASYNC_EXEC_DB: {
@@ -1290,13 +1292,13 @@ static void execute_async_exec(napi_env env, void* data) {
       rc = task->val_count > 0
         ? S.exec_p(db, task->sql, task->vals, task->val_count, &task->affected)
         : S.exec(db, task->sql, &task->affected);
-      if (rc != S_OK) task->base.error = dup_cstr(S.errmsg(db), "Exec error");
+      if (rc != STOOLAP_OK) task->base.error = dup_cstr(S.errmsg(db), "Exec error");
       break;
     }
     case ASYNC_EXEC_DB_SIMPLE: {
       StoolapDB* db = (StoolapDB*)task->target;
       rc = S.exec(db, task->sql, &task->affected);
-      if (rc != S_OK) task->base.error = dup_cstr(S.errmsg(db), "Exec error");
+      if (rc != STOOLAP_OK) task->base.error = dup_cstr(S.errmsg(db), "Exec error");
       break;
     }
     case ASYNC_EXEC_TX: {
@@ -1304,13 +1306,13 @@ static void execute_async_exec(napi_env env, void* data) {
       rc = task->val_count > 0
         ? S.tx_exec_p(tx, task->sql, task->vals, task->val_count, &task->affected)
         : S.tx_exec(tx, task->sql, &task->affected);
-      if (rc != S_OK) task->base.error = dup_cstr(S.tx_errmsg(tx), "Transaction exec error");
+      if (rc != STOOLAP_OK) task->base.error = dup_cstr(S.tx_errmsg(tx), "Transaction exec error");
       break;
     }
     case ASYNC_EXEC_STMT: {
       StoolapStmt* stmt = (StoolapStmt*)task->target;
       rc = S.stmt_exec(stmt, task->vals, task->val_count, &task->affected);
-      if (rc != S_OK) task->base.error = dup_cstr(S.stmt_errmsg(stmt), "Statement exec error");
+      if (rc != STOOLAP_OK) task->base.error = dup_cstr(S.stmt_errmsg(stmt), "Statement exec error");
       break;
     }
   }
@@ -1343,14 +1345,14 @@ static void execute_async_query(napi_env env, void* data) {
   (void)env;
   AsyncQueryTask* task = (AsyncQueryTask*)data;
   StoolapRows* rows = NULL;
-  int32_t rc = S_ERR;
+  int32_t rc = STOOLAP_ERR;
 
   if (task->kind == ASYNC_QUERY_DB) {
     StoolapDB* db = (StoolapDB*)task->target;
     rc = task->val_count > 0
       ? S.query_p(db, task->sql, task->vals, task->val_count, &rows)
       : S.query(db, task->sql, &rows);
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       task->base.error = dup_cstr(S.errmsg(db), "Query error");
       return;
     }
@@ -1359,14 +1361,14 @@ static void execute_async_query(napi_env env, void* data) {
     rc = task->val_count > 0
       ? S.tx_query_p(tx, task->sql, task->vals, task->val_count, &rows)
       : S.tx_query(tx, task->sql, &rows);
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       task->base.error = dup_cstr(S.tx_errmsg(tx), "Transaction query error");
       return;
     }
   } else {
     StoolapStmt* stmt = (StoolapStmt*)task->target;
     rc = S.stmt_query(stmt, task->vals, task->val_count, &rows);
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       task->base.error = dup_cstr(S.stmt_errmsg(stmt), "Statement query error");
       return;
     }
@@ -1374,7 +1376,7 @@ static void execute_async_query(napi_env env, void* data) {
 
   rc = S.rows_fetch_all(rows, &task->buf, &task->buf_len);
   S.rows_close(rows);
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     task->base.error = dup_cstr(NULL, "Failed to fetch query results");
     if (task->buf) {
       S.buffer_free(task->buf, task->buf_len);
@@ -1415,7 +1417,7 @@ static void execute_tx_begin_async(napi_env env, void* data) {
   (void)env;
   AsyncTxBeginTask* task = (AsyncTxBeginTask*)data;
   int32_t rc = S.begin(task->db, &task->tx);
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     task->base.error = dup_cstr(S.errmsg(task->db), "Begin error");
   }
 }
@@ -1446,7 +1448,7 @@ static void execute_tx_finish_async(napi_env env, void* data) {
     ? S.tx_commit(task->tx)
     : S.tx_rollback(task->tx);
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     task->base.error = dup_cstr(S.tx_errmsg(task->tx),
                                 task->kind == ASYNC_TX_COMMIT
                                   ? "Failed to commit transaction"
@@ -1566,7 +1568,7 @@ static napi_value fn_db_open(napi_env env, napi_callback_info info) {
     rc = S.open(dsn, &db);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(NULL);
     THROW(env, msg ? msg : "Failed to open database");
   }
@@ -1685,7 +1687,7 @@ static napi_value fn_db_exec(napi_env env, napi_callback_info info) {
     rc = S.exec(db, sql, &affected);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Exec error");
   }
@@ -1742,7 +1744,7 @@ static napi_value fn_db_exec_simple(napi_env env, napi_callback_info info) {
 
   int64_t affected = 0;
   int32_t rc = S.exec(db, sql, &affected);
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Exec error");
   }
@@ -1829,7 +1831,7 @@ static napi_value fn_db_query_buf(napi_env env, napi_callback_info info) {
     rc = S.query(db, sql, &rows);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Query error");
   }
@@ -1924,7 +1926,7 @@ static napi_value fn_db_query(napi_env env, napi_callback_info info) {
     rc = S.query(db, sql, &rows);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Query error");
   }
@@ -1983,7 +1985,7 @@ static napi_value fn_db_query_one(napi_env env, napi_callback_info info) {
     rc = S.query(db, sql, &rows);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Query error");
   }
@@ -2004,7 +2006,7 @@ static napi_value fn_db_prepare(napi_env env, napi_callback_info info) {
 
   StoolapStmt* stmt = NULL;
   int32_t rc = S.prepare(db, sql, &stmt);
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Prepare error");
   }
@@ -2042,7 +2044,7 @@ static napi_value wrap_stmt_exec(napi_env env, napi_callback_info info) {
   if (argc <= 1) {
     int64_t affected = 0;
     int32_t rc = S.stmt_exec(stmt, NULL, 0, &affected);
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       const char* msg = S.stmt_errmsg(stmt);
       THROW(env, msg ? msg : "Statement exec error");
     }
@@ -2055,7 +2057,7 @@ static napi_value wrap_stmt_exec(napi_env env, napi_callback_info info) {
   if (vt == napi_undefined || vt == napi_null) {
     int64_t affected = 0;
     int32_t rc = S.stmt_exec(stmt, NULL, 0, &affected);
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       const char* msg = S.stmt_errmsg(stmt);
       THROW(env, msg ? msg : "Statement exec error");
     }
@@ -2068,7 +2070,7 @@ static napi_value wrap_stmt_exec(napi_env env, napi_callback_info info) {
   if (len == 0) {
     int64_t affected = 0;
     int32_t rc = S.stmt_exec(stmt, NULL, 0, &affected);
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       const char* msg = S.stmt_errmsg(stmt);
       THROW(env, msg ? msg : "Statement exec error");
     }
@@ -2094,7 +2096,7 @@ static napi_value wrap_stmt_exec(napi_env env, napi_callback_info info) {
     int32_t rc = S.stmt_exec(stmt, vals, (int32_t)len, &affected);
     for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
 
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       const char* msg = S.stmt_errmsg(stmt);
       THROW(env, msg ? msg : "Statement exec error");
     }
@@ -2111,7 +2113,7 @@ static napi_value wrap_stmt_exec(napi_env env, napi_callback_info info) {
   int32_t rc = S.stmt_exec(stmt, vals, cnt, &affected);
   free_params(vals, tbufs, tbuf_cnt);
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(stmt);
     THROW(env, msg ? msg : "Statement exec error");
   }
@@ -2168,7 +2170,7 @@ static napi_value wrap_stmt_query_buf(napi_env env, napi_callback_info info) {
     }
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
@@ -2300,7 +2302,7 @@ static napi_value wrap_stmt_query(napi_env env, napi_callback_info info) {
     }
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
@@ -2358,7 +2360,7 @@ static napi_value wrap_stmt_query_one(napi_env env, napi_callback_info info) {
     }
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
@@ -2386,7 +2388,7 @@ static napi_value wrap_stmt_query_one_int_bound(napi_env env, napi_callback_info
   StoolapRows* rows = NULL;
   int32_t rc = S.stmt_query(cs->stmt, &val, 1, &rows);
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
@@ -2430,7 +2432,7 @@ static napi_value wrap_stmt_exec_nums(napi_env env, napi_callback_info info) {
   int64_t affected = 0;
   int32_t rc = S.stmt_exec(cs->stmt, vals, (int32_t)len, &affected);
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement exec error");
   }
@@ -2457,7 +2459,7 @@ static napi_value wrap_stmt_query_nums(napi_env env, napi_callback_info info) {
   StoolapRows* rows = NULL;
   int32_t rc = S.stmt_query(cs->stmt, vals, (int32_t)len, &rows);
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
@@ -2482,7 +2484,7 @@ static napi_value wrap_stmt_query_one_nums(napi_env env, napi_callback_info info
   StoolapRows* rows = NULL;
   int32_t rc = S.stmt_query(cs->stmt, vals, (int32_t)len, &rows);
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
@@ -2531,7 +2533,7 @@ static napi_value fn_tx_begin(napi_env env, napi_callback_info info) {
 
   StoolapTx* tx = NULL;
   int32_t rc = S.begin(db, &tx);
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Begin error");
   }
@@ -2611,7 +2613,7 @@ static napi_value wrap_tx_exec(napi_env env, napi_callback_info info) {
     rc = S.tx_exec(tx, sql, &affected);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.tx_errmsg(tx);
     THROW(env, msg ? msg : "Transaction exec error");
   }
@@ -2706,7 +2708,7 @@ static napi_value wrap_tx_query_buf(napi_env env, napi_callback_info info) {
     rc = S.tx_query(tx, sql, &rows);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.tx_errmsg(tx);
     THROW(env, msg ? msg : "Transaction query error");
   }
@@ -2801,7 +2803,7 @@ static napi_value wrap_tx_query(napi_env env, napi_callback_info info) {
     rc = S.tx_query(tx, sql, &rows);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.tx_errmsg(tx);
     THROW(env, msg ? msg : "Transaction query error");
   }
@@ -2860,7 +2862,7 @@ static napi_value wrap_tx_query_one(napi_env env, napi_callback_info info) {
     rc = S.tx_query(tx, sql, &rows);
   }
 
-  if (rc != S_OK) {
+  if (rc != STOOLAP_OK) {
     const char* msg = S.tx_errmsg(tx);
     THROW(env, msg ? msg : "Transaction query error");
   }
@@ -2878,7 +2880,7 @@ static napi_value wrap_tx_commit(napi_env env, napi_callback_info info) {
   napi_get_value_external(env, argv[0], (void**)&tx);
 
   int32_t rc = S.tx_commit(tx);
-  if (rc != S_OK) THROW(env, "Failed to commit transaction");
+  if (rc != STOOLAP_OK) THROW(env, "Failed to commit transaction");
 
   napi_value undef;
   napi_get_undefined(env, &undef);
@@ -2915,7 +2917,7 @@ static napi_value wrap_tx_rollback(napi_env env, napi_callback_info info) {
   napi_get_value_external(env, argv[0], (void**)&tx);
 
   int32_t rc = S.tx_rollback(tx);
-  if (rc != S_OK) THROW(env, "Failed to rollback transaction");
+  if (rc != STOOLAP_OK) THROW(env, "Failed to rollback transaction");
 
   napi_value undef;
   napi_get_undefined(env, &undef);
@@ -2993,7 +2995,7 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
     /* Free only text buffers, keep vals/tbufs arrays for reuse */
     for (int k = 0; k < tbuf_cnt; k++) { free(tbufs[k]); tbufs[k] = NULL; }
 
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       free(vals); free(tbufs);
       const char* msg = S.tx_errmsg(tx);
       THROW(env, msg ? msg : "Transaction batch exec error");
@@ -3052,7 +3054,7 @@ static napi_value wrap_stmt_exec_batch(napi_env env, napi_callback_info info) {
 
     for (int k = 0; k < tbuf_cnt; k++) { free(tbufs[k]); tbufs[k] = NULL; }
 
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       free(vals); free(tbufs);
       const char* msg = S.stmt_errmsg(stmt);
       THROW(env, msg ? msg : "Statement batch exec error");
@@ -3166,10 +3168,10 @@ static napi_value wrap_db_exec_batch_buf(napi_env env, napi_callback_info info) 
   if (row_count == 0) return make_changes(env, 0);
   StoolapTx* tx = NULL;
   int32_t rc = S.begin(db, &tx);
-  if (rc != S_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Begin error"); }
+  if (rc != STOOLAP_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Begin error"); }
   StoolapStmt* stmt = NULL;
   rc = S.prepare(db, sql, &stmt);
-  if (rc != S_OK) { S.tx_rollback(tx); const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Prepare error"); }
+  if (rc != STOOLAP_OK) { S.tx_rollback(tx); const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Prepare error"); }
   int64_t total = 0;
   for (uint32_t i = 0; i < row_count; i++) {
     StoolapValue vals[MAX_STACK_PARAMS];
@@ -3179,12 +3181,12 @@ static napi_value wrap_db_exec_batch_buf(napi_env env, napi_callback_info info) 
     ptr += consumed;
     int64_t affected = 0;
     rc = S.stmt_exec(stmt, vals, decoded, &affected);
-    if (rc != S_OK) { const char* msg = S.stmt_errmsg(stmt); S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, msg ? msg : "Batch exec error"); }
+    if (rc != STOOLAP_OK) { const char* msg = S.stmt_errmsg(stmt); S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, msg ? msg : "Batch exec error"); }
     total += affected;
   }
   S.stmt_finalize(stmt);
   rc = S.tx_commit(tx);
-  if (rc != S_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Commit error"); }
+  if (rc != STOOLAP_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Commit error"); }
   return make_changes(env, total);
 }
 
@@ -3217,7 +3219,7 @@ static napi_value wrap_stmt_exec_batch_buf(napi_env env, napi_callback_info info
     ptr += consumed;
     int64_t affected = 0;
     int32_t rc = S.stmt_exec(stmt, vals, decoded, &affected);
-    if (rc != S_OK) {
+    if (rc != STOOLAP_OK) {
       const char* msg = S.stmt_errmsg(stmt);
       THROW(env, msg ? msg : "Statement batch exec error");
     }

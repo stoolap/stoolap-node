@@ -10,9 +10,7 @@
         "MACOSX_DEPLOYMENT_TARGET": "10.15"
       },
       "msvs_settings": {
-        "VCCLCompilerTool": {
-          "AdditionalOptions": ["/TC"]
-        }
+        "VCCLCompilerTool": {}
       },
       "conditions": [
         [
