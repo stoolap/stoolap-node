@@ -10,23 +10,42 @@ import { performance } from "node:perf_hooks";
 import { createRequire } from "node:module";
 
 const isBun = typeof Bun !== "undefined";
+const isDeno = typeof Deno !== "undefined";
 const require = createRequire(import.meta.url);
 const { Database: StoolapDB } = require("./index.js");
 
 let SqliteDB;
+let sqliteMode; // "bun" | "better" | "node"
 if (isBun) {
   SqliteDB = (await import("bun:sqlite")).Database;
+  sqliteMode = "bun";
+} else if (isDeno) {
+  SqliteDB = (await import("node:sqlite")).DatabaseSync;
+  sqliteMode = "node";
 } else {
-  SqliteDB = require("better-sqlite3");
+  try {
+    SqliteDB = require("better-sqlite3");
+    sqliteMode = "better";
+  } catch {
+    SqliteDB = (await import("node:sqlite")).DatabaseSync;
+    sqliteMode = "node";
+  }
 }
 
-// bun:sqlite uses stmt.values() for raw array results; better-sqlite3 uses stmt.raw(true).all()
+// Raw array results: each driver has a different API
 function sqliteRawAll(stmt) {
-  if (isBun) return stmt.values();
+  if (sqliteMode === "bun") return stmt.values();
+  if (sqliteMode === "node") {
+    stmt.setReturnArrays(true);
+    const r = stmt.all();
+    stmt.setReturnArrays(false);
+    return r;
+  }
   return stmt.raw(true).all();
 }
 function sqliteRawAllLoop(stmt) {
-  if (isBun) return stmt.values();
+  if (sqliteMode === "bun") return stmt.values();
+  if (sqliteMode === "node") return stmt.all(); // caller sets setReturnArrays
   return stmt.all(); // caller must set raw(true) first for better-sqlite3
 }
 
@@ -86,8 +105,13 @@ function seedRandom(i) {
 // ============================================================
 
 async function main() {
-  const runtime = isBun ? "Bun" : "Node.js";
-  const sqliteDriver = isBun ? "bun:sqlite" : "better-sqlite3";
+  const runtime = isBun ? "Bun" : isDeno ? "Deno" : "Node.js";
+  const sqliteDriver =
+    sqliteMode === "bun"
+      ? "bun:sqlite"
+      : sqliteMode === "node"
+        ? "node:sqlite"
+        : "better-sqlite3";
   console.log(`Stoolap vs SQLite (${sqliteDriver}) -${runtime} Benchmark`);
   console.log(
     `Configuration: ${ROW_COUNT} rows, ${ITERATIONS} iterations per test`,
@@ -113,7 +137,8 @@ async function main() {
 
   // --- SQLite setup ---
   const ldb = new SqliteDB(":memory:");
-  if (!isBun) ldb.pragma("journal_mode = WAL");
+  if (sqliteMode === "better") ldb.pragma("journal_mode = WAL");
+  else if (sqliteMode === "node") ldb.exec("PRAGMA journal_mode = WAL");
   ldb.exec(`
     CREATE TABLE users (
       id INTEGER PRIMARY KEY,
@@ -135,9 +160,18 @@ async function main() {
   const lInsert = ldb.prepare(
     "INSERT INTO users (id, name, email, age, balance, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
-  const lInsertMany = ldb.transaction((rows) => {
-    for (const r of rows) lInsert.run(...r);
-  });
+  let lInsertMany;
+  if (sqliteMode === "better") {
+    lInsertMany = ldb.transaction((rows) => {
+      for (const r of rows) lInsert.run(...r);
+    });
+  } else {
+    lInsertMany = (rows) => {
+      ldb.exec("BEGIN");
+      for (const r of rows) lInsert.run(...r);
+      ldb.exec("COMMIT");
+    };
+  }
 
   const userRows = [];
   for (let i = 1; i <= ROW_COUNT; i++) {
@@ -275,11 +309,13 @@ async function main() {
     for (let i = 0; i < ITERATIONS_HEAVY; i++) sSt.queryRawSync();
     const sUs = ((performance.now() - t) * 1000) / ITERATIONS_HEAVY;
 
-    if (!isBun) lSt.raw(true);
+    if (sqliteMode === "better") lSt.raw(true);
+    else if (sqliteMode === "node") lSt.setReturnArrays(true);
     t = performance.now();
     for (let i = 0; i < ITERATIONS_HEAVY; i++) sqliteRawAllLoop(lSt);
     const lUs = ((performance.now() - t) * 1000) / ITERATIONS_HEAVY;
-    if (!isBun) lSt.raw(false);
+    if (sqliteMode === "better") lSt.raw(false);
+    else if (sqliteMode === "node") lSt.setReturnArrays(false);
 
     printRow("SELECT * (full scan)", sUs, lUs);
   }
@@ -488,10 +524,16 @@ async function main() {
     const status = statuses[seedRandom(i * 31) % 4];
     orderRows.push([i, userId, amount, status, "2024-01-15"]);
   }
-  const lOrderMany = ldb.transaction((rows) => {
-    for (const r of rows) lOrderInsert.run(...r);
-  });
-  lOrderMany(orderRows);
+  if (sqliteMode === "better") {
+    const lOrderMany = ldb.transaction((rows) => {
+      for (const r of rows) lOrderInsert.run(...r);
+    });
+    lOrderMany(orderRows);
+  } else {
+    ldb.exec("BEGIN");
+    for (const r of orderRows) lOrderInsert.run(...r);
+    ldb.exec("COMMIT");
+  }
   sOrderInsert.executeBatchSync(orderRows);
 
   printHeader("ADVANCED OPERATIONS");
@@ -797,9 +839,18 @@ async function main() {
     }
     const sUs = ((performance.now() - t) * 1000) / iters;
 
-    const lBatchInsert = ldb.transaction((batch) => {
-      for (const r of batch) lInsertSt.run(...r);
-    });
+    let lBatchInsert;
+    if (sqliteMode === "better") {
+      lBatchInsert = ldb.transaction((batch) => {
+        for (const r of batch) lInsertSt.run(...r);
+      });
+    } else {
+      lBatchInsert = (batch) => {
+        ldb.exec("BEGIN");
+        for (const r of batch) lInsertSt.run(...r);
+        ldb.exec("COMMIT");
+      };
+    }
 
     t = performance.now();
     for (let iter = 0; iter < iters; iter++) {
@@ -1282,11 +1333,13 @@ async function main() {
     for (let i = 0; i < iters; i++) sSt.queryRawSync();
     const sUs = ((performance.now() - t) * 1000) / iters;
 
-    if (!isBun) lSt.raw(true);
+    if (sqliteMode === "better") lSt.raw(true);
+    else if (sqliteMode === "node") lSt.setReturnArrays(true);
     t = performance.now();
     for (let i = 0; i < iters; i++) sqliteRawAllLoop(lSt);
     const lUs = ((performance.now() - t) * 1000) / iters;
-    if (!isBun) lSt.raw(false);
+    if (sqliteMode === "better") lSt.raw(false);
+    else if (sqliteMode === "node") lSt.setReturnArrays(false);
 
     printRow("Large result (no LIMIT)", sUs, lUs);
   }

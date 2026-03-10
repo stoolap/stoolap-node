@@ -85,6 +85,8 @@ typedef int32_t (*fn_tx_exec)(StoolapTx*, const char*, int64_t*);
 typedef int32_t (*fn_tx_exec_p)(StoolapTx*, const char*, const StoolapValue*, int32_t, int64_t*);
 typedef int32_t (*fn_tx_query)(StoolapTx*, const char*, StoolapRows**);
 typedef int32_t (*fn_tx_query_p)(StoolapTx*, const char*, const StoolapValue*, int32_t, StoolapRows**);
+typedef int32_t (*fn_tx_stmt_exec)(StoolapTx*, StoolapStmt*, const StoolapValue*, int32_t, int64_t*);
+typedef int32_t (*fn_tx_stmt_query)(StoolapTx*, StoolapStmt*, const StoolapValue*, int32_t, StoolapRows**);
 typedef int32_t (*fn_tx_commit)(StoolapTx*);
 typedef int32_t (*fn_tx_rollback)(StoolapTx*);
 typedef const char* (*fn_tx_errmsg)(const StoolapTx*);
@@ -127,6 +129,8 @@ static struct {
   fn_tx_exec_p tx_exec_p;
   fn_tx_query tx_query;
   fn_tx_query_p tx_query_p;
+  fn_tx_stmt_exec tx_stmt_exec;
+  fn_tx_stmt_query tx_stmt_query;
   fn_tx_commit tx_commit;
   fn_tx_rollback tx_rollback;
   fn_tx_errmsg tx_errmsg;
@@ -1523,6 +1527,8 @@ static napi_value fn_load_library(napi_env env, napi_callback_info info) {
   LOAD(tx_exec_p,     "stoolap_tx_exec_params");
   LOAD(tx_query,      "stoolap_tx_query");
   LOAD(tx_query_p,    "stoolap_tx_query_params");
+  LOAD(tx_stmt_exec,  "stoolap_tx_stmt_exec");
+  LOAD(tx_stmt_query, "stoolap_tx_stmt_query");
   LOAD(tx_commit,     "stoolap_tx_commit");
   LOAD(tx_rollback,   "stoolap_tx_rollback");
   LOAD(tx_errmsg,     "stoolap_tx_errmsg");
@@ -2948,22 +2954,33 @@ static napi_value wrap_tx_rollback_async(napi_env env, napi_callback_info info) 
  * Batch exec in C — copies SQL once, pre-allocates param buffers,
  * loops param sets in C. Eliminates N × JS↔C crossings + N×malloc/free. */
 static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
+  size_t argc = 4;
+  napi_value argv[4];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
 
-  StoolapTx* tx;
-  napi_get_value_external(env, argv[0], (void**)&tx);
+  StoolapDB* db;
+  napi_get_value_external(env, argv[0], (void**)&db);
 
-  GET_SQL_STRING(env, argv[1], sql);
+  StoolapTx* tx;
+  napi_get_value_external(env, argv[1], (void**)&tx);
+
+  GET_SQL_STRING(env, argv[2], sql);
 
   uint32_t batch_len;
-  napi_get_array_length(env, argv[2], &batch_len);
+  napi_get_array_length(env, argv[3], &batch_len);
   if (batch_len == 0) return make_changes(env, 0);
+
+  /* Prepare statement once, execute N times within the transaction */
+  StoolapStmt* stmt = NULL;
+  int32_t rc = S.prepare(db, sql, &stmt);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(db);
+    THROW(env, msg ? msg : "Prepare error");
+  }
 
   /* Get param count from first element — pre-allocate ONCE */
   napi_value first_arr;
-  napi_get_element(env, argv[2], 0, &first_arr);
+  napi_get_element(env, argv[3], 0, &first_arr);
   uint32_t param_count;
   napi_get_array_length(env, first_arr, &param_count);
 
@@ -2974,7 +2991,7 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
 
   for (uint32_t i = 0; i < batch_len; i++) {
     napi_value params_arr;
-    napi_get_element(env, argv[2], i, &params_arr);
+    napi_get_element(env, argv[3], i, &params_arr);
 
     /* Convert params into pre-allocated buffers */
     int tbuf_cnt = 0;
@@ -2982,15 +2999,15 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
       napi_value elem;
       napi_get_element(env, params_arr, j, &elem);
       if (js_to_value(env, elem, &vals[j], tbufs, &tbuf_cnt) != 0) {
-        /* Cleanup on error */
         for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
         free(vals); free(tbufs);
+        S.stmt_finalize(stmt);
         THROW(env, "Failed to convert parameters");
       }
     }
 
     int64_t affected = 0;
-    int32_t rc = S.tx_exec_p(tx, sql, vals, (int32_t)param_count, &affected);
+    rc = S.tx_stmt_exec(tx, stmt, vals, (int32_t)param_count, &affected);
 
     /* Free only text buffers, keep vals/tbufs arrays for reuse */
     for (int k = 0; k < tbuf_cnt; k++) { free(tbufs[k]); tbufs[k] = NULL; }
@@ -2998,6 +3015,7 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
     if (rc != STOOLAP_OK) {
       free(vals); free(tbufs);
       const char* msg = S.tx_errmsg(tx);
+      S.stmt_finalize(stmt);
       THROW(env, msg ? msg : "Transaction batch exec error");
     }
 
@@ -3006,6 +3024,7 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
 
   free(vals);
   free(tbufs);
+  S.stmt_finalize(stmt);
   return make_changes(env, total_affected);
 }
 
@@ -3180,8 +3199,8 @@ static napi_value wrap_db_exec_batch_buf(napi_env env, napi_callback_info info) 
     if (decoded != ppr) { S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, "Batch param decode error"); }
     ptr += consumed;
     int64_t affected = 0;
-    rc = S.stmt_exec(stmt, vals, decoded, &affected);
-    if (rc != STOOLAP_OK) { const char* msg = S.stmt_errmsg(stmt); S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, msg ? msg : "Batch exec error"); }
+    rc = S.tx_stmt_exec(tx, stmt, vals, decoded, &affected);
+    if (rc != STOOLAP_OK) { const char* msg = S.tx_errmsg(tx); S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, msg ? msg : "Batch exec error"); }
     total += affected;
   }
   S.stmt_finalize(stmt);

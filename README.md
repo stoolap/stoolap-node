@@ -1,11 +1,13 @@
 # @stoolap/node
 
-High-performance Node.js driver for [Stoolap](https://github.com/stoolap/stoolap), a modern embedded SQL database with MVCC, time-travel queries, and full ACID compliance.
+High-performance JavaScript driver for [Stoolap](https://github.com/stoolap/stoolap), a modern embedded SQL database with MVCC, time-travel queries, and full ACID compliance.
 
-Built with a native N-API C addon for minimal overhead. Provides both async and sync APIs.
+Built with a native N-API C addon for minimal overhead. Works with Node.js, Bun, and Deno. Provides both async and sync APIs.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
+[![Bun](https://img.shields.io/badge/bun-compatible-f472b6.svg)](https://bun.sh)
+[![Deno](https://img.shields.io/badge/deno-compatible-000000.svg)](https://deno.com)
 
 ## Installation
 
