@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "install": "node-gyp rebuild",
+    "build": "node-gyp rebuild",
     "test": "node --test __test__/index.spec.mjs",
     "bench": "node benchmark.mjs"
   },

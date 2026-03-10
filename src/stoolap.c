@@ -1527,8 +1527,10 @@ static napi_value fn_load_library(napi_env env, napi_callback_info info) {
   LOAD(tx_exec_p,     "stoolap_tx_exec_params");
   LOAD(tx_query,      "stoolap_tx_query");
   LOAD(tx_query_p,    "stoolap_tx_query_params");
-  LOAD(tx_stmt_exec,  "stoolap_tx_stmt_exec");
-  LOAD(tx_stmt_query, "stoolap_tx_stmt_query");
+  /* Optional symbols — not in all engine versions */
+  S.tx_stmt_exec  = (fn_tx_stmt_exec) DLSYM(lib_handle, "stoolap_tx_stmt_exec");
+  S.tx_stmt_query = (fn_tx_stmt_query)DLSYM(lib_handle, "stoolap_tx_stmt_query");
+
   LOAD(tx_commit,     "stoolap_tx_commit");
   LOAD(tx_rollback,   "stoolap_tx_rollback");
   LOAD(tx_errmsg,     "stoolap_tx_errmsg");
@@ -2970,12 +2972,16 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
   napi_get_array_length(env, argv[3], &batch_len);
   if (batch_len == 0) return make_changes(env, 0);
 
-  /* Prepare statement once, execute N times within the transaction */
+  /* Prepare statement once if tx_stmt_exec is available */
   StoolapStmt* stmt = NULL;
-  int32_t rc = S.prepare(db, sql, &stmt);
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.errmsg(db);
-    THROW(env, msg ? msg : "Prepare error");
+  int use_stmt = (S.tx_stmt_exec != NULL);
+  int32_t rc;
+  if (use_stmt) {
+    rc = S.prepare(db, sql, &stmt);
+    if (rc != STOOLAP_OK) {
+      const char* msg = S.errmsg(db);
+      THROW(env, msg ? msg : "Prepare error");
+    }
   }
 
   /* Get param count from first element — pre-allocate ONCE */
@@ -3001,13 +3007,17 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
       if (js_to_value(env, elem, &vals[j], tbufs, &tbuf_cnt) != 0) {
         for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
         free(vals); free(tbufs);
-        S.stmt_finalize(stmt);
+        if (stmt) S.stmt_finalize(stmt);
         THROW(env, "Failed to convert parameters");
       }
     }
 
     int64_t affected = 0;
-    rc = S.tx_stmt_exec(tx, stmt, vals, (int32_t)param_count, &affected);
+    if (use_stmt) {
+      rc = S.tx_stmt_exec(tx, stmt, vals, (int32_t)param_count, &affected);
+    } else {
+      rc = S.tx_exec_p(tx, sql, vals, (int32_t)param_count, &affected);
+    }
 
     /* Free only text buffers, keep vals/tbufs arrays for reuse */
     for (int k = 0; k < tbuf_cnt; k++) { free(tbufs[k]); tbufs[k] = NULL; }
@@ -3015,7 +3025,7 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
     if (rc != STOOLAP_OK) {
       free(vals); free(tbufs);
       const char* msg = S.tx_errmsg(tx);
-      S.stmt_finalize(stmt);
+      if (stmt) S.stmt_finalize(stmt);
       THROW(env, msg ? msg : "Transaction batch exec error");
     }
 
@@ -3024,7 +3034,7 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
 
   free(vals);
   free(tbufs);
-  S.stmt_finalize(stmt);
+  if (stmt) S.stmt_finalize(stmt);
   return make_changes(env, total_affected);
 }
 
@@ -3189,21 +3199,28 @@ static napi_value wrap_db_exec_batch_buf(napi_env env, napi_callback_info info) 
   int32_t rc = S.begin(db, &tx);
   if (rc != STOOLAP_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Begin error"); }
   StoolapStmt* stmt = NULL;
-  rc = S.prepare(db, sql, &stmt);
-  if (rc != STOOLAP_OK) { S.tx_rollback(tx); const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Prepare error"); }
+  int use_stmt = (S.tx_stmt_exec != NULL);
+  if (use_stmt) {
+    rc = S.prepare(db, sql, &stmt);
+    if (rc != STOOLAP_OK) { S.tx_rollback(tx); const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Prepare error"); }
+  }
   int64_t total = 0;
   for (uint32_t i = 0; i < row_count; i++) {
     StoolapValue vals[MAX_STACK_PARAMS];
     size_t consumed = 0;
     int decoded = decode_params_buf(ptr, (size_t)(end - ptr), vals, ppr, &consumed);
-    if (decoded != ppr) { S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, "Batch param decode error"); }
+    if (decoded != ppr) { if (stmt) S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, "Batch param decode error"); }
     ptr += consumed;
     int64_t affected = 0;
-    rc = S.tx_stmt_exec(tx, stmt, vals, decoded, &affected);
-    if (rc != STOOLAP_OK) { const char* msg = S.tx_errmsg(tx); S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, msg ? msg : "Batch exec error"); }
+    if (use_stmt) {
+      rc = S.tx_stmt_exec(tx, stmt, vals, decoded, &affected);
+    } else {
+      rc = S.tx_exec_p(tx, sql, vals, decoded, &affected);
+    }
+    if (rc != STOOLAP_OK) { const char* msg = S.tx_errmsg(tx); if (stmt) S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, msg ? msg : "Batch exec error"); }
     total += affected;
   }
-  S.stmt_finalize(stmt);
+  if (stmt) S.stmt_finalize(stmt);
   rc = S.tx_commit(tx);
   if (rc != STOOLAP_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Commit error"); }
   return make_changes(env, total);
