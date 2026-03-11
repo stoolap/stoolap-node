@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -156,6 +157,8 @@ static LibHandle lib_handle = NULL;
 /* ---- Helpers ---- */
 
 #define THROW(env, msg) do { napi_throw_error(env, NULL, msg); return NULL; } while(0)
+#define ERR_SAVE(msg, fallback) \
+  char _eb[512]; snprintf(_eb, sizeof(_eb), "%s", (msg) ? (msg) : (fallback))
 #define CHECK(env, status) if ((status) != napi_ok) return NULL
 
 static napi_value make_changes(napi_env env, int64_t n) {
@@ -3023,10 +3026,10 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
     for (int k = 0; k < tbuf_cnt; k++) { free(tbufs[k]); tbufs[k] = NULL; }
 
     if (rc != STOOLAP_OK) {
+      ERR_SAVE(S.tx_errmsg(tx), "Transaction batch exec error");
       free(vals); free(tbufs);
-      const char* msg = S.tx_errmsg(tx);
       if (stmt) S.stmt_finalize(stmt);
-      THROW(env, msg ? msg : "Transaction batch exec error");
+      THROW(env, _eb);
     }
 
     total_affected += affected;
@@ -3202,7 +3205,7 @@ static napi_value wrap_db_exec_batch_buf(napi_env env, napi_callback_info info) 
   int use_stmt = (S.tx_stmt_exec != NULL);
   if (use_stmt) {
     rc = S.prepare(db, sql, &stmt);
-    if (rc != STOOLAP_OK) { S.tx_rollback(tx); const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Prepare error"); }
+    if (rc != STOOLAP_OK) { ERR_SAVE(S.errmsg(db), "Prepare error"); S.tx_rollback(tx); THROW(env, _eb); }
   }
   int64_t total = 0;
   for (uint32_t i = 0; i < row_count; i++) {
@@ -3217,12 +3220,12 @@ static napi_value wrap_db_exec_batch_buf(napi_env env, napi_callback_info info) 
     } else {
       rc = S.tx_exec_p(tx, sql, vals, decoded, &affected);
     }
-    if (rc != STOOLAP_OK) { const char* msg = S.tx_errmsg(tx); if (stmt) S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, msg ? msg : "Batch exec error"); }
+    if (rc != STOOLAP_OK) { ERR_SAVE(S.tx_errmsg(tx), "Batch exec error"); if (stmt) S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, _eb); }
     total += affected;
   }
   if (stmt) S.stmt_finalize(stmt);
   rc = S.tx_commit(tx);
-  if (rc != STOOLAP_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Commit error"); }
+  if (rc != STOOLAP_OK) { THROW(env, "Commit error"); }
   return make_changes(env, total);
 }
 
