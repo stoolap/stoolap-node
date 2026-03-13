@@ -1,6 +1,6 @@
 {
   "name": "@stoolap/lib-darwin-arm64",
-  "version": "0.3.5",
+  "version": "0.3.7",
   "main": "libstoolap.dylib",
   "files": [
     "libstoolap.dylib"

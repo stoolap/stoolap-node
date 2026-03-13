@@ -69,6 +69,7 @@ typedef struct {
 typedef const char* (*fn_version)(void);
 typedef int32_t (*fn_open)(const char*, StoolapDB**);
 typedef int32_t (*fn_open_mem)(StoolapDB**);
+typedef int32_t (*fn_clone)(StoolapDB*, StoolapDB**);
 typedef int32_t (*fn_close)(StoolapDB*);
 typedef const char* (*fn_errmsg)(const StoolapDB*);
 typedef int32_t (*fn_exec)(StoolapDB*, const char*, int64_t*);
@@ -113,6 +114,7 @@ static struct {
   fn_version version;
   fn_open open;
   fn_open_mem open_mem;
+  fn_clone clone;
   fn_close close;
   fn_errmsg errmsg;
   fn_exec exec;
@@ -1513,6 +1515,7 @@ static napi_value fn_load_library(napi_env env, napi_callback_info info) {
   LOAD(version,       "stoolap_version");
   LOAD(open,          "stoolap_open");
   LOAD(open_mem,      "stoolap_open_in_memory");
+  LOAD(clone,         "stoolap_clone");
   LOAD(close,         "stoolap_close");
   LOAD(errmsg,        "stoolap_errmsg");
   LOAD(exec,          "stoolap_exec");
@@ -1586,6 +1589,27 @@ static napi_value fn_db_open(napi_env env, napi_callback_info info) {
 
   napi_value ext;
   napi_create_external(env, db, NULL, NULL, &ext);
+  return ext;
+}
+
+/* dbClone(external): external */
+static napi_value fn_db_clone(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+
+  StoolapDB* db;
+  napi_get_value_external(env, argv[0], (void**)&db);
+
+  StoolapDB* cloned = NULL;
+  int32_t rc = S.clone(db, &cloned);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(db);
+    THROW(env, msg ? msg : "Failed to clone database");
+  }
+
+  napi_value ext;
+  napi_create_external(env, cloned, NULL, NULL, &ext);
   return ext;
 }
 
@@ -3281,6 +3305,7 @@ static napi_value Init(napi_env env, napi_value exports) {
   EXPORT_FN(env, exports, "loadLibrary",   fn_load_library);
   EXPORT_FN(env, exports, "dbOpen",        fn_db_open);
   EXPORT_FN(env, exports, "dbOpenAsync",   fn_db_open_async);
+  EXPORT_FN(env, exports, "dbClone",       fn_db_clone);
   EXPORT_FN(env, exports, "dbClose",       fn_db_close);
   EXPORT_FN(env, exports, "dbCloseAsync",  fn_db_close_async);
   EXPORT_FN(env, exports, "dbExec",        fn_db_exec);

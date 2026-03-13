@@ -108,6 +108,7 @@ Sync methods run on the main thread. Faster for simple operations but block the 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `Database.openSync(path)` | `Database` | Open a database |
+| `clone()` | `Database` | Clone handle (shared engine, own state) |
 | `executeSync(sql, params?)` | `RunResult` | Execute DML statement |
 | `execSync(sql)` | `void` | Execute a DDL statement |
 | `querySync(sql, params?)` | `Object[]` | Query rows as objects |
@@ -188,6 +189,24 @@ Controls the durability vs. performance trade-off:
 | `snapshot_compression` | `on` | LZ4 compression for snapshots |
 | `compression` | | Set both `wal_compression` and `snapshot_compression` |
 | `compression_threshold` | `64` | Minimum bytes before compressing an entry |
+
+#### Cloning
+
+`clone()` creates a new `Database` handle that shares the same underlying engine (data, indexes, transactions) but has its own executor and error state. Useful for concurrent access patterns such as worker threads.
+
+```js
+const db = await Database.open('./mydata');
+const db2 = db.clone();
+
+// Both see the same data
+await db.execute('INSERT INTO users VALUES ($1, $2)', [1, 'Alice']);
+const row = db2.queryOneSync('SELECT * FROM users WHERE id = $1', [1]);
+// { id: 1, name: 'Alice' }
+
+// Each clone must be closed independently
+await db2.close();
+await db.close();
+```
 
 #### Raw Query Format
 

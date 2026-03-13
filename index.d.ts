@@ -18,6 +18,12 @@ export declare class Database {
    */
   static openSync(path: string): Database;
   /**
+   * Clone this database handle. The clone shares the same underlying engine
+   * (data, indexes, transactions) but has its own executor and error state.
+   * Each clone must be closed independently.
+   */
+  clone(): Database;
+  /**
    * Execute a DDL/DML statement. Returns Promise<{ changes: number }>.
    *
    * @param sql - SQL statement

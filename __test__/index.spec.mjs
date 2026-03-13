@@ -1642,6 +1642,76 @@ describe('Vector support', () => {
 });
 
 // ============================================================
+// Clone
+// ============================================================
+
+describe('Database clone', () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(':memory:');
+    await db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)');
+    await db.execute('INSERT INTO items VALUES ($1, $2)', [1, 'Alpha']);
+    await db.execute('INSERT INTO items VALUES ($1, $2)', [2, 'Beta']);
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it('should clone a database handle and share data', async () => {
+    const db2 = db.clone();
+    const rows = db2.querySync('SELECT * FROM items ORDER BY id');
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].name, 'Alpha');
+    assert.equal(rows[1].name, 'Beta');
+    await db2.close();
+  });
+
+  it('should see writes from the original in the clone', async () => {
+    const db2 = db.clone();
+    await db.execute('INSERT INTO items VALUES ($1, $2)', [3, 'Gamma']);
+    const row = db2.queryOneSync('SELECT * FROM items WHERE id = $1', [3]);
+    assert.equal(row.name, 'Gamma');
+    await db2.close();
+  });
+
+  it('should see writes from the clone in the original', async () => {
+    const db2 = db.clone();
+    db2.executeSync('INSERT INTO items VALUES ($1, $2)', [4, 'Delta']);
+    const row = await db.queryOne('SELECT * FROM items WHERE id = $1', [4]);
+    assert.equal(row.name, 'Delta');
+    await db2.close();
+  });
+
+  it('should close independently without affecting the original', async () => {
+    const db2 = db.clone();
+    await db2.close();
+    const rows = db.querySync('SELECT * FROM items ORDER BY id');
+    assert.ok(rows.length > 0);
+  });
+
+  it('should support transactions on cloned handle', async () => {
+    const db2 = db.clone();
+    const tx = db2.beginSync();
+    tx.executeSync('INSERT INTO items VALUES ($1, $2)', [5, 'Epsilon']);
+    tx.commitSync();
+    const row = db2.queryOneSync('SELECT * FROM items WHERE id = $1', [5]);
+    assert.equal(row.name, 'Epsilon');
+    await db2.close();
+  });
+
+  it('should support prepared statements on cloned handle', async () => {
+    const db2 = db.clone();
+    const stmt = db2.prepare('SELECT * FROM items WHERE id = $1');
+    const row = stmt.queryOneSync([1]);
+    assert.equal(row.name, 'Alpha');
+    stmt.finalize();
+    await db2.close();
+  });
+});
+
+// ============================================================
 // Declaration coverage
 // ============================================================
 
