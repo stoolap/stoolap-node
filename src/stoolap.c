@@ -24,6 +24,7 @@
   typedef HMODULE LibHandle;
 #else
   #include <dlfcn.h>
+  #include <alloca.h>
   #define DLOPEN(path)       dlopen(path, RTLD_NOW | RTLD_LOCAL)
   #define DLSYM(lib, name)   dlsym(lib, name)
   #define DLERROR()          dlerror()
