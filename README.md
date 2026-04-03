@@ -179,7 +179,8 @@ Controls the durability vs. performance trade-off:
 |-----------|---------|-------------|
 | `sync_mode` | `normal` | Sync mode: `none`, `normal`, or `full` |
 | `checkpoint_interval` | `60` | Seconds between checkpoint cycles (seal + compact + WAL truncate) |
-| `compact_threshold` | `4` | Number of cold volumes before compaction merges them |
+| `compact_threshold` | `4` | Sub-target volumes per table before merging |
+| `target_volume_rows` | `1048576` | Target rows per cold volume. Controls compaction split boundary |
 | `checkpoint_on_close` | `on` | Seal all hot rows on clean shutdown for fast startup |
 | `wal_compression` | `on` | LZ4 compression for WAL entries |
 | `volume_compression` | `on` | LZ4 compression for cold volume files |
