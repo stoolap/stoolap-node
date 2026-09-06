@@ -1,6 +1,6 @@
 {
   "name": "@stoolap/node",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "High-performance Node.js driver for Stoolap embedded SQL database",
   "main": "index.js",
   "types": "index.d.ts",
@@ -18,11 +18,11 @@
     "bench": "node benchmark.mjs"
   },
   "optionalDependencies": {
-    "@stoolap/lib-darwin-arm64": "0.4.0",
-    "@stoolap/lib-darwin-x64": "0.4.0",
-    "@stoolap/lib-linux-arm64-gnu": "0.4.0",
-    "@stoolap/lib-linux-x64-gnu": "0.4.0",
-    "@stoolap/lib-win32-x64-msvc": "0.4.0"
+    "@stoolap/lib-darwin-arm64": "0.4.1",
+    "@stoolap/lib-darwin-x64": "0.4.1",
+    "@stoolap/lib-linux-arm64-gnu": "0.4.1",
+    "@stoolap/lib-linux-x64-gnu": "0.4.1",
+    "@stoolap/lib-win32-x64-msvc": "0.4.1"
   },
   "devDependencies": {
     "better-sqlite3": "^12.6.2",
