@@ -149,13 +149,26 @@ jobs:
         run: |
           for pkg in npm/*/; do
             if [ -f "$pkg/package.json" ]; then
+              name=$(node -p "require('./$pkg/package.json').name")
+              ver=$(node -p "require('./$pkg/package.json').version")
+              if npm view "$name@$ver" version >/dev/null 2>&1; then
+                echo "Skipping $name@$ver (already published)"
+                continue
+              fi
               echo "Publishing $pkg..."
               npm publish "$pkg" --access public --provenance
             fi
           done
 
       - name: Publish main package
-        run: npm publish --access public --provenance
+        run: |
+          name=$(node -p "require('./package.json').name")
+          ver=$(node -p "require('./package.json').version")
+          if npm view "$name@$ver" version >/dev/null 2>&1; then
+            echo "Skipping $name@$ver (already published)"
+          else
+            npm publish --access public --provenance
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
