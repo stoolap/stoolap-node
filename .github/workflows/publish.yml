@@ -83,6 +83,9 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Upgrade npm for trusted publishing (OIDC)
+        run: npm install -g npm@latest
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -150,13 +153,9 @@ jobs:
               npm publish "$pkg" --access public --provenance
             fi
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
