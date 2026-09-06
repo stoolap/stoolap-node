@@ -80,7 +80,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-2022] # windows-latest ships VS 2026, which node-gyp 11 (Node 18) cannot detect
         node: [18, 22]
     runs-on: ${{ matrix.os }}
     steps:
@@ -98,7 +98,7 @@ jobs:
             echo "name=lib-aarch64-apple-darwin" >> $GITHUB_OUTPUT
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             echo "name=lib-x86_64-unknown-linux-gnu" >> $GITHUB_OUTPUT
-          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          elif [[ "${{ matrix.os }}" == "windows-2022" ]]; then
             echo "name=lib-x86_64-pc-windows-msvc" >> $GITHUB_OUTPUT
           fi
 
