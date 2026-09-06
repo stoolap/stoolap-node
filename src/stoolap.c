@@ -286,6 +286,7 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
       void* data;
       size_t len;
       napi_get_buffer_info(env, jsval, &data, &len);
+      if (len == SIZE_MAX) return -1; /* prevent len+1 integer overflow in malloc size */
       char* buf = malloc(len + 1);
       if (!buf) return -1;
       memcpy(buf, data, len);
@@ -458,7 +459,7 @@ static int js_to_value_copy(napi_env env, napi_value jsval, StoolapValue* out,
       napi_get_typedarray_info(env, jsval, &ta_type, &ta_len, &ta_data, NULL, NULL);
       if (ta_type == napi_float32_array) {
         size_t byte_len = ta_len * 4;
-        uint8_t* buf = malloc(byte_len);
+      uint8_t* buf = calloc(ta_len, 4); /* calloc validates nmemb*size overflow internally */
         if (!buf) return -1;
         if (byte_len > 0) memcpy(buf, ta_data, byte_len);
         heap_bufs[*heap_buf_count] = (char*)buf;
