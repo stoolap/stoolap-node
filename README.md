@@ -185,7 +185,9 @@ Controls the durability vs. performance trade-off:
 | `wal_compression` | `on` | LZ4 compression for WAL entries |
 | `volume_compression` | `on` | LZ4 compression for cold volume files |
 | `compression` | `on` | Shorthand: set both `wal_compression` and `volume_compression` |
-| `keep_snapshots` | `5` | Number of backup snapshot files to retain |
+| `keep_snapshots` | `3` | Number of backup snapshot files to retain |
+| `hot_max_rows` | `262144` | Committed hot rows per table that trigger an early seal (`0` = off) |
+| `hot_max_bytes` | `0` | Hot row bytes per table above which commits wait for a seal (`0` = off) |
 
 #### Cloning
 
