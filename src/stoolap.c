@@ -65,6 +65,14 @@ typedef struct {
   } v;
 } StoolapValue;
 
+/* Named parameter (:name) — name is not NUL-terminated, length in name_len */
+typedef struct {
+  const char* name;
+  int32_t name_len;
+  int32_t _padding;
+  StoolapValue value;
+} StoolapNamedParam;
+
 /* ---- Function pointer types ---- */
 
 typedef const char* (*fn_version)(void);
@@ -89,25 +97,21 @@ typedef int32_t (*fn_tx_exec_p)(StoolapTx*, const char*, const StoolapValue*, in
 typedef int32_t (*fn_tx_query)(StoolapTx*, const char*, StoolapRows**);
 typedef int32_t (*fn_tx_query_p)(StoolapTx*, const char*, const StoolapValue*, int32_t, StoolapRows**);
 typedef int32_t (*fn_tx_stmt_exec)(StoolapTx*, StoolapStmt*, const StoolapValue*, int32_t, int64_t*);
-typedef int32_t (*fn_tx_stmt_query)(StoolapTx*, StoolapStmt*, const StoolapValue*, int32_t, StoolapRows**);
 typedef int32_t (*fn_tx_commit)(StoolapTx*);
 typedef int32_t (*fn_tx_rollback)(StoolapTx*);
 typedef const char* (*fn_tx_errmsg)(const StoolapTx*);
-typedef int32_t (*fn_rows_next)(StoolapRows*);
-typedef int32_t (*fn_rows_col_count)(const StoolapRows*);
-typedef const char* (*fn_rows_col_name)(const StoolapRows*, int32_t);
-typedef int32_t (*fn_rows_col_type)(const StoolapRows*, int32_t);
-typedef int64_t (*fn_rows_col_int)(const StoolapRows*, int32_t);
-typedef double (*fn_rows_col_dbl)(const StoolapRows*, int32_t);
-typedef const char* (*fn_rows_col_text)(StoolapRows*, int32_t, int64_t*);
-typedef int32_t (*fn_rows_col_bool)(const StoolapRows*, int32_t);
-typedef int64_t (*fn_rows_col_ts)(const StoolapRows*, int32_t);
-typedef const uint8_t* (*fn_rows_col_blob)(const StoolapRows*, int32_t, int64_t*);
-typedef int32_t (*fn_rows_col_null)(const StoolapRows*, int32_t);
-typedef int64_t (*fn_rows_affected)(const StoolapRows*);
 typedef void (*fn_rows_close)(StoolapRows*);
 typedef int32_t (*fn_rows_fetch_all)(StoolapRows*, uint8_t**, int64_t*);
 typedef void (*fn_buffer_free)(uint8_t*, int64_t);
+typedef const char* (*fn_rows_errmsg)(const StoolapRows*);
+typedef int32_t (*fn_rows_fetch_chunk)(StoolapRows*, int32_t, const uint8_t**, int64_t*, int32_t*);
+typedef int32_t (*fn_exec_named)(StoolapDB*, const char*, const StoolapNamedParam*, int32_t, int64_t*);
+typedef int32_t (*fn_query_named)(StoolapDB*, const char*, const StoolapNamedParam*, int32_t, StoolapRows**);
+typedef int32_t (*fn_tx_exec_named)(StoolapTx*, const char*, const StoolapNamedParam*, int32_t, int64_t*);
+typedef int32_t (*fn_tx_query_named)(StoolapTx*, const char*, const StoolapNamedParam*, int32_t, StoolapRows**);
+typedef int32_t (*fn_stmt_query_all)(StoolapStmt*, StoolapTx*, const StoolapValue*, int32_t, const uint8_t**, int64_t*);
+typedef int32_t (*fn_query_params_all)(StoolapDB*, StoolapTx*, const char*, const StoolapValue*, int32_t, const uint8_t**, int64_t*);
+typedef int32_t (*fn_query_named_all)(StoolapDB*, StoolapTx*, const char*, const StoolapNamedParam*, int32_t, const uint8_t**, int64_t*);
 
 /* ---- Loaded function pointers ---- */
 
@@ -134,25 +138,21 @@ static struct {
   fn_tx_query tx_query;
   fn_tx_query_p tx_query_p;
   fn_tx_stmt_exec tx_stmt_exec;
-  fn_tx_stmt_query tx_stmt_query;
   fn_tx_commit tx_commit;
   fn_tx_rollback tx_rollback;
   fn_tx_errmsg tx_errmsg;
-  fn_rows_next rows_next;
-  fn_rows_col_count rows_col_count;
-  fn_rows_col_name rows_col_name;
-  fn_rows_col_type rows_col_type;
-  fn_rows_col_int rows_col_int;
-  fn_rows_col_dbl rows_col_dbl;
-  fn_rows_col_text rows_col_text;
-  fn_rows_col_bool rows_col_bool;
-  fn_rows_col_ts rows_col_ts;
-  fn_rows_col_blob rows_col_blob;
-  fn_rows_col_null rows_col_null;
-  fn_rows_affected rows_affected;
   fn_rows_close rows_close;
   fn_rows_fetch_all rows_fetch_all;
   fn_buffer_free buffer_free;
+  fn_rows_errmsg rows_errmsg;
+  fn_rows_fetch_chunk rows_fetch_chunk;
+  fn_exec_named exec_named;
+  fn_query_named query_named;
+  fn_tx_exec_named tx_exec_named;
+  fn_tx_query_named tx_query_named;
+  fn_stmt_query_all stmt_query_all;
+  fn_query_params_all query_params_all;
+  fn_query_named_all query_named_all;
 } S;
 
 static LibHandle lib_handle = NULL;
@@ -162,7 +162,12 @@ static LibHandle lib_handle = NULL;
 #define THROW(env, msg) do { napi_throw_error(env, NULL, msg); return NULL; } while(0)
 #define ERR_SAVE(msg, fallback) \
   char _eb[512]; snprintf(_eb, sizeof(_eb), "%s", (msg) ? (msg) : (fallback))
-#define CHECK(env, status) if ((status) != napi_ok) return NULL
+
+/* True when d is an integer the engine can hold exactly; false for NaN,
+ * infinities and anything outside 2^53 (casting those is undefined). */
+static inline int is_safe_integer(double d) {
+  return d == d && d >= -9007199254740992.0 && d <= 9007199254740992.0 && (double)(int64_t)d == d;
+}
 
 static napi_value make_changes(napi_env env, int64_t n) {
   napi_value obj, val;
@@ -175,9 +180,71 @@ static napi_value make_changes(napi_env env, int64_t n) {
   return obj;
 }
 
-/* Convert a JS value at index `i` in `args` array to StoolapValue. */
-static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
-                       char** text_bufs, int* text_buf_count) {
+/* ---- Text arena: strings bound for one call live on the stack; only strings
+ * that do not fit are malloc'd and freed with the arena. ---- */
+/* A string copied with N-API "fits" only when there was room for one more
+ * UTF-8 sequence: V8 never splits a character, so a copy short of the
+ * buffer by less than that may still be truncated. */
+#define UTF8_SLACK 4
+
+#define PARAM_ARENA_SIZE 2048
+typedef struct {
+  char buf[PARAM_ARENA_SIZE];
+  size_t used;
+  char** heap;
+  int heap_count, heap_cap;
+} TextArena;
+#define ARENA_INIT(a) do { (a).used = 0; (a).heap = NULL; (a).heap_count = 0; (a).heap_cap = 0; } while (0)
+
+static char* arena_alloc(TextArena* a, size_t len) {
+  if (a->used + len <= PARAM_ARENA_SIZE) {
+    char* p = a->buf + a->used;
+    a->used += len;
+    return p;
+  }
+  char* p = malloc(len);
+  if (!p) return NULL;
+  if (a->heap_count == a->heap_cap) {
+    int cap = a->heap_cap ? a->heap_cap * 2 : 8;
+    char** grown = realloc(a->heap, (size_t)cap * sizeof(char*));
+    if (!grown) { free(p); return NULL; }
+    a->heap = grown;
+    a->heap_cap = cap;
+  }
+  a->heap[a->heap_count++] = p;
+  return p;
+}
+
+static void arena_reset(TextArena* a) {
+  for (int i = 0; i < a->heap_count; i++) free(a->heap[i]);
+  free(a->heap);
+  ARENA_INIT(*a);
+}
+
+/* Copy a JS string into the arena, NUL-terminated. Writes straight into the
+ * arena's free space when it fits, so a short string is copied once. */
+static char* arena_string(napi_env env, napi_value jsval, TextArena* a, size_t* out_len) {
+  size_t avail = PARAM_ARENA_SIZE - a->used;
+  size_t len = 0;
+  if (avail > UTF8_SLACK) {
+    char* dst = a->buf + a->used;
+    if (napi_get_value_string_utf8(env, jsval, dst, avail, &len) != napi_ok) return NULL;
+    if (len + UTF8_SLACK < avail) {
+      a->used += len + 1;
+      *out_len = len;
+      return dst;
+    }
+  }
+  if (napi_get_value_string_utf8(env, jsval, NULL, 0, &len) != napi_ok) return NULL;
+  char* dst = arena_alloc(a, len + 1);
+  if (!dst) return NULL;
+  napi_get_value_string_utf8(env, jsval, dst, len + 1, &len);
+  *out_len = len;
+  return dst;
+}
+
+/* Convert a JS value to a StoolapValue; text is copied into `ta`. */
+static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out, TextArena* ta) {
   napi_valuetype vt;
   napi_typeof(env, jsval, &vt);
 
@@ -201,8 +268,8 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
     double d;
     napi_get_value_double(env, jsval, &d);
     /* Check if integer */
-    int64_t i64 = (int64_t)d;
-    if ((double)i64 == d && d >= -9007199254740992.0 && d <= 9007199254740992.0) {
+    if (is_safe_integer(d)) {
+      int64_t i64 = (int64_t)d;
       out->value_type = T_INTEGER;
       out->_padding = 0;
       out->v.integer = i64;
@@ -218,6 +285,7 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
     int64_t i64;
     bool lossless;
     napi_get_value_bigint_int64(env, jsval, &i64, &lossless);
+    if (!lossless) return -1; /* outside int64 */
     out->value_type = T_INTEGER;
     out->_padding = 0;
     out->v.integer = i64;
@@ -225,23 +293,9 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
   }
 
   if (vt == napi_string) {
-    /* Single-copy for short strings: try stack buffer first, avoid probe call */
-    char tmp[256];
     size_t len;
-    napi_get_value_string_utf8(env, jsval, tmp, sizeof(tmp), &len);
-    char* buf;
-    if (len < sizeof(tmp) - 1) {
-      buf = malloc(len + 1);
-      if (!buf) return -1;
-      memcpy(buf, tmp, len + 1);
-    } else {
-      napi_get_value_string_utf8(env, jsval, NULL, 0, &len);
-      buf = malloc(len + 1);
-      if (!buf) return -1;
-      napi_get_value_string_utf8(env, jsval, buf, len + 1, &len);
-    }
-    text_bufs[*text_buf_count] = buf;
-    (*text_buf_count)++;
+    char* buf = arena_string(env, jsval, ta, &len);
+    if (!buf) return -1;
     out->value_type = T_TEXT;
     out->_padding = 0;
     out->v.text.ptr = buf;
@@ -256,6 +310,7 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
     if (is_date) {
       double ms;
       napi_get_date_value(env, jsval, &ms);
+      if (ms != ms) { out->value_type = T_NULL; out->_padding = 0; out->v.integer = 0; return 0; }
       out->value_type = T_TIMESTAMP;
       out->_padding = 0;
       out->v.timestamp_nanos = (int64_t)(ms * 1000000.0);
@@ -286,12 +341,10 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
       void* data;
       size_t len;
       napi_get_buffer_info(env, jsval, &data, &len);
-      char* buf = malloc(len + 1);
+      char* buf = arena_alloc(ta, len + 1);
       if (!buf) return -1;
       memcpy(buf, data, len);
       buf[len] = 0;
-      text_bufs[*text_buf_count] = buf;
-      (*text_buf_count)++;
       out->value_type = T_TEXT;
       out->_padding = 0;
       out->v.text.ptr = buf;
@@ -307,12 +360,8 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
     napi_call_function(env, json_obj, stringify_fn, 1, &jsval, &json_str);
 
     size_t len;
-    napi_get_value_string_utf8(env, json_str, NULL, 0, &len);
-    char* buf = malloc(len + 1);
+    char* buf = arena_string(env, json_str, ta, &len);
     if (!buf) return -1;
-    napi_get_value_string_utf8(env, json_str, buf, len + 1, &len);
-    text_bufs[*text_buf_count] = buf;
-    (*text_buf_count)++;
     out->value_type = T_JSON;
     out->_padding = 0;
     out->v.text.ptr = buf;
@@ -326,54 +375,7 @@ static int js_to_value(napi_env env, napi_value jsval, StoolapValue* out,
   return 0;
 }
 
-/* Stack-based fast param conversion for ≤16 params.
- * Returns param count, or -1 on error. Caller must free text bufs only. */
 #define MAX_STACK_PARAMS 16
-
-/* Convert JS params (Array or null) to StoolapValue array. Caller frees. */
-static int convert_params(napi_env env, napi_value js_params,
-                          StoolapValue** out_values, int32_t* out_count,
-                          char*** out_text_bufs, int* out_text_buf_count) {
-  *out_values = NULL;
-  *out_count = 0;
-  *out_text_bufs = NULL;
-  *out_text_buf_count = 0;
-
-  if (!js_params) return 0;
-
-  napi_valuetype vt;
-  napi_typeof(env, js_params, &vt);
-  if (vt == napi_undefined || vt == napi_null) return 0;
-
-  bool is_array;
-  napi_is_array(env, js_params, &is_array);
-  if (!is_array) return 0;
-
-  uint32_t len;
-  napi_get_array_length(env, js_params, &len);
-  if (len == 0) return 0;
-
-  StoolapValue* vals = calloc(len, sizeof(StoolapValue));
-  char** tbufs = calloc(len * 2, sizeof(char*)); /* generous allocation */
-  int tbuf_count = 0;
-
-  for (uint32_t i = 0; i < len; i++) {
-    napi_value elem;
-    napi_get_element(env, js_params, i, &elem);
-    if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_count) != 0) {
-      free(vals);
-      for (int j = 0; j < tbuf_count; j++) free(tbufs[j]);
-      free(tbufs);
-      return -1;
-    }
-  }
-
-  *out_values = vals;
-  *out_count = (int32_t)len;
-  *out_text_bufs = tbufs;
-  *out_text_buf_count = tbuf_count;
-  return 0;
-}
 
 static int js_to_value_copy(napi_env env, napi_value jsval, StoolapValue* out,
                             char** heap_bufs, int* heap_buf_count) {
@@ -399,8 +401,8 @@ static int js_to_value_copy(napi_env env, napi_value jsval, StoolapValue* out,
   if (vt == napi_number) {
     double d;
     napi_get_value_double(env, jsval, &d);
-    int64_t i64 = (int64_t)d;
-    if ((double)i64 == d && d >= -9007199254740992.0 && d <= 9007199254740992.0) {
+    if (is_safe_integer(d)) {
+      int64_t i64 = (int64_t)d;
       out->value_type = T_INTEGER;
       out->_padding = 0;
       out->v.integer = i64;
@@ -416,6 +418,7 @@ static int js_to_value_copy(napi_env env, napi_value jsval, StoolapValue* out,
     int64_t i64;
     bool lossless;
     napi_get_value_bigint_int64(env, jsval, &i64, &lossless);
+    if (!lossless) return -1; /* outside int64 */
     out->value_type = T_INTEGER;
     out->_padding = 0;
     out->v.integer = i64;
@@ -443,6 +446,7 @@ static int js_to_value_copy(napi_env env, napi_value jsval, StoolapValue* out,
     if (is_date) {
       double ms;
       napi_get_date_value(env, jsval, &ms);
+      if (ms != ms) { out->value_type = T_NULL; out->_padding = 0; out->v.integer = 0; return 0; }
       out->value_type = T_TIMESTAMP;
       out->_padding = 0;
       out->v.timestamp_nanos = (int64_t)(ms * 1000000.0);
@@ -571,23 +575,34 @@ static void free_params(StoolapValue* vals, char** tbufs, int tbuf_count) {
 /* ---- Constants for direct C parsing ---- */
 
 #define MAX_DIRECT_COLS  64
-#define DIRECT_ROW_LIMIT 5
+#define DIRECT_ROW_LIMIT 16
 
 /* ---- Cached prepared statement wrapper ---- */
 
 typedef struct {
   StoolapStmt* stmt;
   int32_t col_count;
-  uint32_t header_size;  /* cached byte offset to first row data in binary buffer */
+  uint32_t header_size;  /* cached byte offset of row_count in the packed buffer */
   char col_names[MAX_DIRECT_COLS][128];
   int has_cache;
+  /* the packed header the cache was built from, compared on every call so a
+   * schema change after prepare is noticed */
+  uint8_t* header;
+  /* JS row factory for this column list (built by the maker in lib/parse.js):
+   * one napi_call_function builds a row with a stable hidden class */
+  napi_ref factory;
 } CachedStmt;
+
+/* makeRowFactory from lib/parse.js, handed over at load time */
+static napi_ref row_factory_maker = NULL;
 
 static void finalize_cached_stmt(napi_env env, void* data, void* hint) {
   (void)env; (void)hint;
   CachedStmt* cs = (CachedStmt*)data;
   if (cs) {
     if (cs->stmt) S.stmt_finalize(cs->stmt);
+    if (cs->factory) napi_delete_reference(env, cs->factory);
+    free(cs->header);
     free(cs);
   }
 }
@@ -600,18 +615,147 @@ static void finalize_cached_stmt(napi_env env, void* data, void* hint) {
 
 #define SQL_STACK_SIZE 512
 
+/* SQL longer than the stack buffer goes to a scratch buffer that is reused
+ * across calls. Only the synchronous wrappers use it, so it needs no lock. */
+static char* sql_scratch = NULL;
+static size_t sql_scratch_cap = 0;
+
+static char* sql_scratch_get(size_t len) {
+  if (len + 1 > sql_scratch_cap) {
+    size_t cap = len + 1 + len / 2;
+    char* grown = realloc(sql_scratch, cap);
+    if (!grown) return NULL;
+    sql_scratch = grown;
+    sql_scratch_cap = cap;
+  }
+  return sql_scratch;
+}
+
 #define GET_SQL_STRING(env, jsval, sql_var) \
   char _stack_sql[SQL_STACK_SIZE]; \
-  size_t _sql_len; \
-  napi_get_value_string_utf8(env, jsval, _stack_sql, SQL_STACK_SIZE, &_sql_len); \
+  size_t _sql_len = 0; \
   char* sql_var; \
-  if (_sql_len < SQL_STACK_SIZE - 1) { \
+  if (napi_get_value_string_utf8(env, jsval, _stack_sql, SQL_STACK_SIZE, &_sql_len) != napi_ok) { \
+    napi_throw_type_error(env, NULL, "sql must be a string"); \
+    return NULL; \
+  } \
+  if (_sql_len + UTF8_SLACK < SQL_STACK_SIZE) { \
     sql_var = _stack_sql; \
   } else { \
     napi_get_value_string_utf8(env, jsval, NULL, 0, &_sql_len); \
-    sql_var = alloca(_sql_len + 1); \
+    sql_var = sql_scratch_get(_sql_len); \
+    if (!sql_var) THROW(env, "Out of memory"); \
     napi_get_value_string_utf8(env, jsval, sql_var, _sql_len + 1, &_sql_len); \
   }
+
+/* ---- Parameter binding ---- */
+typedef struct {
+  StoolapValue stack_vals[MAX_STACK_PARAMS];
+  StoolapValue* vals;
+  int32_t count;
+  TextArena ta;
+} ParamBind;
+
+static void bind_release(ParamBind* pb) {
+  arena_reset(&pb->ta);
+  if (pb->vals != pb->stack_vals) free(pb->vals);
+  pb->vals = pb->stack_vals;
+  pb->count = 0;
+}
+
+/* Bind a JS array of positional params (undefined/null = none).
+ * Returns 0, or -1 after throwing. */
+static int bind_positional(napi_env env, napi_value arr, ParamBind* pb) {
+  pb->vals = pb->stack_vals;
+  pb->count = 0;
+  ARENA_INIT(pb->ta);
+  napi_valuetype vt;
+  napi_typeof(env, arr, &vt);
+  if (vt == napi_undefined || vt == napi_null) return 0;
+  uint32_t len = 0;
+  if (napi_get_array_length(env, arr, &len) != napi_ok) {
+    napi_throw_type_error(env, NULL, "params must be an array");
+    return -1;
+  }
+  if (len == 0) return 0;
+  if (len > MAX_STACK_PARAMS) {
+    pb->vals = malloc(len * sizeof(StoolapValue));
+    if (!pb->vals) { pb->vals = pb->stack_vals; napi_throw_error(env, NULL, "Out of memory"); return -1; }
+  }
+  for (uint32_t i = 0; i < len; i++) {
+    napi_value elem;
+    napi_get_element(env, arr, i, &elem);
+    if (js_to_value(env, elem, &pb->vals[i], &pb->ta) != 0) {
+      bind_release(pb);
+      napi_throw_error(env, NULL, "Failed to convert parameters");
+      return -1;
+    }
+  }
+  pb->count = (int32_t)len;
+  return 0;
+}
+
+typedef struct {
+  StoolapNamedParam stack_np[MAX_STACK_PARAMS];
+  StoolapNamedParam* np;
+  int32_t count;
+  TextArena ta;
+} NamedBind;
+
+static void named_release(NamedBind* nb) {
+  arena_reset(&nb->ta);
+  if (nb->np != nb->stack_np) free(nb->np);
+  nb->np = nb->stack_np;
+  nb->count = 0;
+}
+
+/* Bind named params from parallel JS arrays: `names` (strings) and `values`.
+ * Returns 0, or -1 after throwing. */
+static int bind_named(napi_env env, napi_value names, napi_value values, NamedBind* nb) {
+  nb->np = nb->stack_np;
+  nb->count = 0;
+  ARENA_INIT(nb->ta);
+  uint32_t len = 0;
+  if (napi_get_array_length(env, names, &len) != napi_ok) {
+    napi_throw_type_error(env, NULL, "params must be an object");
+    return -1;
+  }
+  if (len == 0) return 0;
+  if (len > MAX_STACK_PARAMS) {
+    nb->np = malloc(len * sizeof(StoolapNamedParam));
+    if (!nb->np) { nb->np = nb->stack_np; napi_throw_error(env, NULL, "Out of memory"); return -1; }
+  }
+  for (uint32_t i = 0; i < len; i++) {
+    StoolapNamedParam* np = &nb->np[i];
+    np->_padding = 0;
+    napi_value n;
+    napi_get_element(env, names, i, &n);
+    size_t nlen;
+    char* name = arena_string(env, n, &nb->ta, &nlen);
+    if (!name) { named_release(nb); napi_throw_error(env, NULL, "Out of memory"); return -1; }
+    np->name = name;
+    np->name_len = (int32_t)nlen;
+    napi_value v;
+    napi_get_element(env, values, i, &v);
+    if (js_to_value(env, v, &np->value, &nb->ta) != 0) {
+      named_release(nb);
+      napi_throw_error(env, NULL, "Failed to convert parameters");
+      return -1;
+    }
+  }
+  nb->count = (int32_t)len;
+  return 0;
+}
+
+/* Optional transaction argument: external or undefined/null */
+static StoolapTx* tx_arg(napi_env env, napi_value v) {
+  napi_valuetype vt;
+  napi_typeof(env, v, &vt);
+  if (vt == napi_undefined || vt == napi_null) return NULL;
+  StoolapTx* tx = NULL;
+  napi_get_value_external(env, v, (void**)&tx);
+  return tx;
+}
 
 /* ---- Result fetching ---- */
 
@@ -665,21 +809,183 @@ static napi_value make_arraybuffer_from_owned_buffer(napi_env env, uint8_t* buf,
   return arraybuffer;
 }
 
-/* Return raw ArrayBuffer — used for queryRaw only */
-static napi_value fetch_as_arraybuffer(napi_env env, StoolapRows* rows) {
-  uint8_t* buf = NULL;
-  int64_t buf_len = 0;
-  int32_t rc = S.rows_fetch_all(rows, &buf, &buf_len);
-  S.rows_close(rows);
+static napi_value read_buf_val(napi_env env, const uint8_t* buf, uint32_t* poff);
 
-  if (rc != STOOLAP_OK) {
-    if (buf) S.buffer_free(buf, buf_len);
-    napi_value null_val;
-    napi_get_null(env, &null_val);
-    return null_val;
+/* Copy a handle-owned packed buffer into a fresh ArrayBuffer */
+static napi_value arraybuffer_copy(napi_env env, const uint8_t* buf, int64_t len) {
+  void* data;
+  napi_value ab;
+  napi_create_arraybuffer(env, (size_t)len, &data, &ab);
+  if (len > 0) memcpy(data, buf, (size_t)len);
+  return ab;
+}
+
+/* Build one row object from the packed buffer at *off (advanced past the row).
+ * napi_define_properties sets every column in one N-API call. */
+static napi_value packed_row(napi_env env, const uint8_t* buf, uint32_t* off,
+                             char names[][128], int32_t col_count) {
+  napi_value row_obj;
+  napi_create_object(env, &row_obj);
+  napi_property_descriptor props[MAX_DIRECT_COLS];
+  for (int32_t c = 0; c < col_count; c++) {
+    props[c] = (napi_property_descriptor){
+      .utf8name = names[c],
+      .name = NULL, .method = NULL, .getter = NULL, .setter = NULL,
+      .value = read_buf_val(env, buf, off),
+      .attributes = napi_default_jsproperty, .data = NULL,
+    };
   }
+  napi_define_properties(env, row_obj, (size_t)col_count, props);
+  return row_obj;
+}
 
-  return make_arraybuffer_from_owned_buffer(env, buf, buf_len);
+/* Ask lib/parse.js for a row factory for these column names; NULL when it
+ * declines (no columns, or more than it compiles for). */
+static napi_value build_row_factory(napi_env env, char names[][128], int32_t col_count) {
+  if (!row_factory_maker) return NULL;
+  napi_value maker, names_arr, factory;
+  napi_get_reference_value(env, row_factory_maker, &maker);
+  napi_create_array_with_length(env, (size_t)col_count, &names_arr);
+  for (int32_t i = 0; i < col_count; i++) {
+    napi_value name;
+    napi_create_string_utf8(env, names[i], NAPI_AUTO_LENGTH, &name);
+    napi_set_element(env, names_arr, (uint32_t)i, name);
+  }
+  napi_valuetype ft = napi_undefined;
+  if (napi_call_function(env, maker, maker, 1, &names_arr, &factory) != napi_ok ||
+      napi_typeof(env, factory, &ft) != napi_ok || ft != napi_function) {
+    return NULL;
+  }
+  return factory;
+}
+
+/* Row factories for ad hoc statements, keyed by the packed header bytes.
+ * A handful of hot queries keep their factory; the rest round-robin. */
+#define FACTORY_CACHE_SIZE 8
+typedef struct {
+  uint8_t* header;
+  uint32_t len;
+  napi_ref factory;
+} FactoryEntry;
+static FactoryEntry factory_cache[FACTORY_CACHE_SIZE];
+static int factory_cache_next = 0;
+
+static napi_value adhoc_row_factory(napi_env env, const uint8_t* buf, uint32_t header_len,
+                                    char names[][128], int32_t col_count) {
+  for (int i = 0; i < FACTORY_CACHE_SIZE; i++) {
+    FactoryEntry* e = &factory_cache[i];
+    if (e->factory && e->len == header_len && memcmp(e->header, buf, header_len) == 0) {
+      napi_value f;
+      napi_get_reference_value(env, e->factory, &f);
+      return f;
+    }
+  }
+  napi_value f = build_row_factory(env, names, col_count);
+  if (!f) return NULL;
+  uint8_t* copy = malloc(header_len);
+  if (!copy) return f;
+  memcpy(copy, buf, header_len);
+  FactoryEntry* e = &factory_cache[factory_cache_next];
+  factory_cache_next = (factory_cache_next + 1) % FACTORY_CACHE_SIZE;
+  if (e->factory) napi_delete_reference(env, e->factory);
+  free(e->header);
+  e->header = copy;
+  e->len = header_len;
+  napi_create_reference(env, f, 1, &e->factory);
+  return f;
+}
+
+/* Build one row by calling the statement's JS row factory with the values. */
+static napi_value factory_row(napi_env env, const uint8_t* buf, uint32_t* off,
+                              napi_value factory, int32_t col_count) {
+  napi_value argv[MAX_DIRECT_COLS];
+  for (int32_t c = 0; c < col_count; c++) argv[c] = read_buf_val(env, buf, off);
+  napi_value row;
+  if (napi_call_function(env, factory, factory, (size_t)col_count, argv, &row) != napi_ok) {
+    napi_get_null(env, &row);
+  }
+  return row;
+}
+
+#define RESULT_ROWS 0  /* hybrid: objects for small results, ArrayBuffer for JS parsing otherwise */
+#define RESULT_ONE  1  /* first row object, or null */
+#define RESULT_RAW  2  /* ArrayBuffer */
+
+/* Turn the packed result of a *_query_all call into the JS value for `mode`.
+ * `cs` caches the column header of a prepared statement across calls.
+ * Results with more than MAX_DIRECT_COLS columns always go to JS as an
+ * ArrayBuffer; for RESULT_ONE the JS side then takes the first row. */
+static napi_value packed_result(napi_env env, const uint8_t* buf, int64_t len,
+                                int mode, CachedStmt* cs) {
+  if (mode == RESULT_RAW) return arraybuffer_copy(env, buf, len);
+  uint32_t cc;
+  memcpy(&cc, buf, 4);
+  if (cc > MAX_DIRECT_COLS) return arraybuffer_copy(env, buf, len);
+  int32_t col_count = (int32_t)cc;
+  char local_names[MAX_DIRECT_COLS][128];
+  char (*names)[128];
+  uint32_t off;
+  if (cs && cs->has_cache && cs->col_count == col_count &&
+      (int64_t)cs->header_size <= len && memcmp(buf, cs->header, cs->header_size) == 0) {
+    names = cs->col_names;
+    off = cs->header_size;
+  } else {
+    names = cs ? cs->col_names : local_names;
+    off = 4;
+    for (int32_t i = 0; i < col_count; i++) {
+      uint16_t nlen;
+      memcpy(&nlen, buf + off, 2); off += 2;
+      /* a name longer than the C key buffer: let JS build the keys */
+      if (nlen > 127) return arraybuffer_copy(env, buf, len);
+      memcpy(names[i], buf + off, nlen);
+      names[i][nlen] = '\0';
+      off += nlen;
+    }
+    if (cs) {
+      uint8_t* copy = realloc(cs->header, off);
+      if (copy) {
+        memcpy(copy, buf, off);
+        cs->header = copy;
+        cs->col_count = col_count;
+        cs->header_size = off;
+        cs->has_cache = 1;
+      } else {
+        cs->has_cache = 0;
+      }
+      if (cs->factory) {
+        napi_delete_reference(env, cs->factory);
+        cs->factory = NULL;
+      }
+      napi_value f = build_row_factory(env, names, col_count);
+      if (f) napi_create_reference(env, f, 1, &cs->factory);
+    }
+  }
+  uint32_t row_count;
+  memcpy(&row_count, buf + off, 4); off += 4;
+  napi_value factory = NULL;
+  if (cs) {
+    if (cs->factory) napi_get_reference_value(env, cs->factory, &factory);
+  } else {
+    factory = adhoc_row_factory(env, buf, off, names, col_count);
+  }
+  if (mode == RESULT_ONE) {
+    if (row_count == 0) {
+      napi_value null_val;
+      napi_get_null(env, &null_val);
+      return null_val;
+    }
+    return factory ? factory_row(env, buf, &off, factory, col_count)
+                   : packed_row(env, buf, &off, names, col_count);
+  }
+  if (row_count > DIRECT_ROW_LIMIT) return arraybuffer_copy(env, buf, len);
+  napi_value result;
+  napi_create_array_with_length(env, row_count, &result);
+  for (uint32_t r = 0; r < row_count; r++) {
+    napi_value row = factory ? factory_row(env, buf, &off, factory, col_count)
+                             : packed_row(env, buf, &off, names, col_count);
+    napi_set_element(env, result, r, row);
+  }
+  return result;
 }
 
 /* ---- Direct C parsing of binary buffer → JS objects ---- */
@@ -744,375 +1050,34 @@ static napi_value read_buf_val(napi_env env, const uint8_t* buf, uint32_t* poff)
   return val;
 }
 
-/*
- * Read a column value directly from StoolapRows (row-by-row API).
- * No serialization — reads straight from the Rust iterator.
- * Uses rows_col_type to detect NULL (saves separate rows_col_null FFI call).
- */
-static napi_value read_col_val(napi_env env, StoolapRows* rows, int32_t c) {
-  napi_value val;
-  int32_t type = S.rows_col_type(rows, c);
-  switch (type) {
-    case T_NULL:
-      napi_get_null(env, &val);
-      return val;
-    case T_INTEGER: {
-      int64_t v = S.rows_col_int(rows, c);
-      if (v >= -2147483648LL && v <= 2147483647LL)
-        napi_create_int32(env, (int32_t)v, &val);
-      else
-        napi_create_int64(env, v, &val);
-      return val;
-    }
-    case T_FLOAT:
-      napi_create_double(env, S.rows_col_dbl(rows, c), &val);
-      return val;
-    case T_TEXT:
-    case T_JSON: {
-      int64_t len;
-      const char* txt = S.rows_col_text(rows, c, &len);
-      napi_create_string_utf8(env, txt, (size_t)len, &val);
-      return val;
-    }
-    case T_BOOLEAN:
-      napi_get_boolean(env, S.rows_col_bool(rows, c) != 0, &val);
-      return val;
-    case T_TIMESTAMP: {
-      double ms = (double)S.rows_col_ts(rows, c) / 1000000.0;
-      napi_create_date(env, ms, &val);
-      return val;
-    }
-    case T_BLOB: {
-      int64_t blen;
-      const uint8_t* bdata = S.rows_col_blob(rows, c, &blen);
-      void* ab_data;
-      napi_value ab;
-      napi_create_arraybuffer(env, (size_t)blen, &ab_data, &ab);
-      if (blen > 0) memcpy(ab_data, bdata, (size_t)blen);
-      napi_create_typedarray(env, napi_float32_array, (size_t)(blen / 4), ab, 0, &val);
-      return val;
-    }
-    default:
-      napi_get_null(env, &val);
-      return val;
-  }
-}
-
-/*
- * Hybrid fetch: auto-selects based on result size.
- * - Small results (≤ DIRECT_ROW_LIMIT): parse buffer in C with
- *   napi_set_named_property (no napi string key creation)
- * - Large results: return ArrayBuffer for JS parsing
- * Closes rows handle.
- */
-static napi_value fetch_result(napi_env env, StoolapRows* rows) {
-  uint8_t* buf = NULL;
-  int64_t buf_len = 0;
-  int32_t rc = S.rows_fetch_all(rows, &buf, &buf_len);
-  S.rows_close(rows);
-
-  if (rc != STOOLAP_OK || !buf || buf_len == 0) {
-    if (buf) S.buffer_free(buf, buf_len);
-    napi_value empty;
-    napi_create_array_with_length(env, 0, &empty);
-    return empty;
-  }
-
-  /* Parse header */
-  uint32_t off = 0;
-  uint32_t col_count;
-  memcpy(&col_count, buf, 4); off = 4;
-
-  /* Store null-terminated column names on stack (avoids napi string creation) */
-  char col_names[MAX_DIRECT_COLS][128];
-  for (uint32_t i = 0; i < col_count; i++) {
-    uint16_t nlen;
-    memcpy(&nlen, buf + off, 2); off += 2;
-    if (i < MAX_DIRECT_COLS && nlen < 127) {
-      memcpy(col_names[i], buf + off, nlen);
-      col_names[i][nlen] = '\0';
-    }
-    off += nlen;
-  }
-
-  uint32_t row_count;
-  memcpy(&row_count, buf + off, 4); off += 4;
-
-  if (row_count <= DIRECT_ROW_LIMIT && col_count <= MAX_DIRECT_COLS) {
-    /* Small result: parse in C, batch set via napi_define_properties */
-    napi_value result;
-    napi_create_array_with_length(env, row_count, &result);
-
-    napi_property_descriptor props[MAX_DIRECT_COLS];
-    for (uint32_t r = 0; r < row_count; r++) {
-      napi_value row_obj;
-      napi_create_object(env, &row_obj);
-      for (uint32_t c = 0; c < col_count; c++) {
-        props[c] = (napi_property_descriptor){
-          .utf8name = col_names[c],
-          .name = NULL, .method = NULL, .getter = NULL, .setter = NULL,
-          .value = read_buf_val(env, buf, &off),
-          .attributes = napi_default_jsproperty,
-          .data = NULL,
-        };
-      }
-      napi_define_properties(env, row_obj, col_count, props);
-      napi_set_element(env, result, r, row_obj);
-    }
-
-    S.buffer_free(buf, buf_len);
-    return result;
-  }
-
-  /* Large result: return ArrayBuffer for JS parsing */
-  RustBuffer* rb = malloc(sizeof(RustBuffer));
-  rb->ptr = buf;
-  rb->len = buf_len;
-
-  napi_value arraybuffer;
-  napi_status status = napi_create_external_arraybuffer(
-    env, buf, (size_t)buf_len, finalize_rust_buffer, rb, &arraybuffer);
-
-  if (status != napi_ok) {
-    free(rb);
-    void* ab_data;
-    napi_create_arraybuffer(env, (size_t)buf_len, &ab_data, &arraybuffer);
-    memcpy(ab_data, buf, (size_t)buf_len);
-    S.buffer_free(buf, buf_len);
-  }
-
-  return arraybuffer;
-}
-
-/*
- * Fetch first row as JS object, or null if empty.
- * Uses DIRECT row iteration — skips rows_fetch_all serialization entirely.
- * Uses napi_define_properties batch — 1 N-API call sets all properties.
- * Optimal for point lookups.
- * Closes rows handle.
- */
-static napi_value fetch_one(napi_env env, StoolapRows* rows) {
-  int32_t rc = S.rows_next(rows);
-  if (rc != STOOLAP_ROW) {
-    S.rows_close(rows);
-    napi_value null_val;
-    napi_get_null(env, &null_val);
-    return null_val;
-  }
-
-  int32_t col_count = S.rows_col_count(rows);
-  if (col_count > MAX_DIRECT_COLS) col_count = MAX_DIRECT_COLS;
-
-  napi_value row_obj;
-  napi_create_object(env, &row_obj);
-
-  /* Read all values and set in one batch via napi_define_properties */
-  napi_property_descriptor props[MAX_DIRECT_COLS];
-  for (int32_t c = 0; c < col_count; c++) {
-    props[c] = (napi_property_descriptor){
-      .utf8name = S.rows_col_name(rows, c),
-      .name = NULL,
-      .method = NULL,
-      .getter = NULL,
-      .setter = NULL,
-      .value = read_col_val(env, rows, c),
-      .attributes = napi_default_jsproperty,
-      .data = NULL,
-    };
-  }
-  napi_define_properties(env, row_obj, (size_t)col_count, props);
-
-  S.rows_close(rows);
-  return row_obj;
-}
-
-/*
- * Direct row iteration for prepared statement queryOne.
- * Uses rows_next + read_col_val (direct column access) — no serialization.
- * Caches column names in CachedStmt to avoid rows_col_name calls on repeat.
- * Faster than fetch_one_cached (no rows_fetch_all serialize+deserialize roundtrip).
- */
-static napi_value fetch_one_direct_cached(napi_env env, StoolapRows* rows, CachedStmt* cs) {
-  int32_t rc = S.rows_next(rows);
-  if (rc != STOOLAP_ROW) {
-    S.rows_close(rows);
-    napi_value null_val;
-    napi_get_null(env, &null_val);
-    return null_val;
-  }
-
-  int32_t col_count;
-
-  if (!cs->has_cache) {
-    /* First call: cache column names from rows iterator */
-    int32_t cc = S.rows_col_count(rows);
-    col_count = (cc > MAX_DIRECT_COLS) ? MAX_DIRECT_COLS : cc;
-    cs->col_count = col_count;
-
-    for (int32_t i = 0; i < col_count; i++) {
-      const char* name = S.rows_col_name(rows, i);
-      size_t nlen = strlen(name);
-      if (nlen > 127) nlen = 127;
-      memcpy(cs->col_names[i], name, nlen);
-      cs->col_names[i][nlen] = '\0';
-    }
-    cs->has_cache = 1;
+/* Bound function: queryOne with a single integer param, CachedStmt baked in.
+ * Saves the napi_get_value_external of the generic path. */
+static napi_value wrap_stmt_query_one_int_bound(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  void* data;
+  napi_get_cb_info(env, info, &argc, argv, NULL, &data);
+  CachedStmt* cs = (CachedStmt*)data;
+  double d;
+  napi_get_value_double(env, argv[0], &d);
+  StoolapValue val;
+  val._padding = 0;
+  if (is_safe_integer(d)) {
+    val.value_type = T_INTEGER;
+    val.v.integer = (int64_t)d;
   } else {
-    col_count = cs->col_count;
+    val.value_type = T_FLOAT;
+    val.v.float64 = d;
   }
-
-  napi_value row_obj;
-  napi_create_object(env, &row_obj);
-
-  napi_property_descriptor props[MAX_DIRECT_COLS];
-  for (int32_t c = 0; c < col_count; c++) {
-    props[c] = (napi_property_descriptor){
-      .utf8name = cs->col_names[c],
-      .name = NULL,
-      .method = NULL,
-      .getter = NULL,
-      .setter = NULL,
-      .value = read_col_val(env, rows, c),
-      .attributes = napi_default_jsproperty,
-      .data = NULL,
-    };
+  const uint8_t* buf = NULL;
+  int64_t len = 0;
+  int32_t rc = S.stmt_query_all(cs->stmt, NULL, &val, 1, &buf, &len);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.stmt_errmsg(cs->stmt);
+    THROW(env, msg ? msg : "Statement query error");
   }
-  napi_define_properties(env, row_obj, (size_t)col_count, props);
-
-  S.rows_close(rows);
-  return row_obj;
+  return packed_result(env, buf, len, RESULT_ONE, cs);
 }
-
-/*
- * Hybrid fetch for prepared statements with column name caching.
- * Same as fetch_result but uses CachedStmt to cache header info.
- * On repeat calls: skip header parsing, use cached column names.
- */
-static napi_value fetch_result_cached(napi_env env, StoolapRows* rows, CachedStmt* cs) {
-  uint8_t* buf = NULL;
-  int64_t buf_len = 0;
-  int32_t rc = S.rows_fetch_all(rows, &buf, &buf_len);
-  S.rows_close(rows);
-
-  if (rc != STOOLAP_OK || !buf || buf_len == 0) {
-    if (buf) S.buffer_free(buf, buf_len);
-    napi_value empty;
-    napi_create_array_with_length(env, 0, &empty);
-    return empty;
-  }
-
-  uint32_t off = 0;
-  int32_t col_count;
-
-  if (!cs->has_cache || cs->header_size == 0) {
-    /* First call, or cache was set by direct path (no header_size) */
-    uint32_t cc;
-    memcpy(&cc, buf, 4); off = 4;
-    col_count = (cc > MAX_DIRECT_COLS) ? MAX_DIRECT_COLS : (int32_t)cc;
-    cs->col_count = col_count;
-
-    for (int32_t i = 0; i < col_count; i++) {
-      uint16_t nlen;
-      memcpy(&nlen, buf + off, 2); off += 2;
-      uint16_t cplen = (nlen > 127) ? 127 : nlen;
-      memcpy(cs->col_names[i], buf + off, cplen);
-      cs->col_names[i][cplen] = '\0';
-      off += nlen;
-    }
-
-    uint32_t row_count;
-    memcpy(&row_count, buf + off, 4); off += 4;
-    cs->header_size = off;
-    cs->has_cache = 1;
-
-    if (row_count == 0) {
-      S.buffer_free(buf, buf_len);
-      napi_value empty;
-      napi_create_array_with_length(env, 0, &empty);
-      return empty;
-    }
-
-    if (row_count <= DIRECT_ROW_LIMIT) {
-      /* Small result: parse in C */
-      napi_value result;
-      napi_create_array_with_length(env, row_count, &result);
-      napi_property_descriptor props[MAX_DIRECT_COLS];
-      for (uint32_t r = 0; r < row_count; r++) {
-        napi_value row_obj;
-        napi_create_object(env, &row_obj);
-        for (int32_t c = 0; c < col_count; c++) {
-          props[c] = (napi_property_descriptor){
-            .utf8name = cs->col_names[c],
-            .name = NULL, .method = NULL, .getter = NULL, .setter = NULL,
-            .value = read_buf_val(env, buf, &off),
-            .attributes = napi_default_jsproperty, .data = NULL,
-          };
-        }
-        napi_define_properties(env, row_obj, (size_t)col_count, props);
-        napi_set_element(env, result, r, row_obj);
-      }
-      S.buffer_free(buf, buf_len);
-      return result;
-    }
-  } else {
-    /* Cached: use cached column info */
-    col_count = cs->col_count;
-    off = cs->header_size;
-    uint32_t row_count;
-    memcpy(&row_count, buf + cs->header_size - 4, 4);
-
-    if (row_count == 0) {
-      S.buffer_free(buf, buf_len);
-      napi_value empty;
-      napi_create_array_with_length(env, 0, &empty);
-      return empty;
-    }
-
-    if (row_count <= DIRECT_ROW_LIMIT) {
-      napi_value result;
-      napi_create_array_with_length(env, row_count, &result);
-      napi_property_descriptor props[MAX_DIRECT_COLS];
-      for (uint32_t r = 0; r < row_count; r++) {
-        napi_value row_obj;
-        napi_create_object(env, &row_obj);
-        for (int32_t c = 0; c < col_count; c++) {
-          props[c] = (napi_property_descriptor){
-            .utf8name = cs->col_names[c],
-            .name = NULL, .method = NULL, .getter = NULL, .setter = NULL,
-            .value = read_buf_val(env, buf, &off),
-            .attributes = napi_default_jsproperty, .data = NULL,
-          };
-        }
-        napi_define_properties(env, row_obj, (size_t)col_count, props);
-        napi_set_element(env, result, r, row_obj);
-      }
-      S.buffer_free(buf, buf_len);
-      return result;
-    }
-  }
-
-  /* Large result: return ArrayBuffer for JS parsing */
-  RustBuffer* rb = malloc(sizeof(RustBuffer));
-  rb->ptr = buf;
-  rb->len = buf_len;
-
-  napi_value arraybuffer;
-  napi_status status = napi_create_external_arraybuffer(
-    env, buf, (size_t)buf_len, finalize_rust_buffer, rb, &arraybuffer);
-
-  if (status != napi_ok) {
-    free(rb);
-    void* ab_data;
-    napi_create_arraybuffer(env, (size_t)buf_len, &ab_data, &arraybuffer);
-    memcpy(ab_data, buf, (size_t)buf_len);
-    S.buffer_free(buf, buf_len);
-  }
-
-  return arraybuffer;
-}
-
-/* Forward declaration for bound function used in dbPrepare */
-static napi_value wrap_stmt_query_one_int_bound(napi_env env, napi_callback_info info);
 
 /* ---- Async work helpers ---- */
 
@@ -1385,9 +1350,12 @@ static void execute_async_query(napi_env env, void* data) {
   }
 
   rc = S.rows_fetch_all(rows, &task->buf, &task->buf_len);
+  if (rc != STOOLAP_OK) {
+    /* a runtime error while the rows were produced, e.g. an invalid REGEXP */
+    task->base.error = dup_cstr(S.rows_errmsg(rows), "Failed to fetch query results");
+  }
   S.rows_close(rows);
   if (rc != STOOLAP_OK) {
-    task->base.error = dup_cstr(NULL, "Failed to fetch query results");
     if (task->buf) {
       S.buffer_free(task->buf, task->buf_len);
       task->buf = NULL;
@@ -1459,7 +1427,9 @@ static void execute_tx_finish_async(napi_env env, void* data) {
     : S.tx_rollback(task->tx);
 
   if (rc != STOOLAP_OK) {
-    task->base.error = dup_cstr(S.tx_errmsg(task->tx),
+    /* the tx handle is consumed by commit/rollback; the message is in the
+     * thread-local error of this worker */
+    task->base.error = dup_cstr(S.errmsg(NULL),
                                 task->kind == ASYNC_TX_COMMIT
                                   ? "Failed to commit transaction"
                                   : "Failed to rollback transaction");
@@ -1534,31 +1504,38 @@ static napi_value fn_load_library(napi_env env, napi_callback_info info) {
   LOAD(tx_exec_p,     "stoolap_tx_exec_params");
   LOAD(tx_query,      "stoolap_tx_query");
   LOAD(tx_query_p,    "stoolap_tx_query_params");
-  /* Optional symbols — not in all engine versions */
-  S.tx_stmt_exec  = (fn_tx_stmt_exec) DLSYM(lib_handle, "stoolap_tx_stmt_exec");
-  S.tx_stmt_query = (fn_tx_stmt_query)DLSYM(lib_handle, "stoolap_tx_stmt_query");
+  LOAD(tx_stmt_exec,  "stoolap_tx_stmt_exec");
 
   LOAD(tx_commit,     "stoolap_tx_commit");
   LOAD(tx_rollback,   "stoolap_tx_rollback");
   LOAD(tx_errmsg,     "stoolap_tx_errmsg");
-  LOAD(rows_next,     "stoolap_rows_next");
-  LOAD(rows_col_count,"stoolap_rows_column_count");
-  LOAD(rows_col_name, "stoolap_rows_column_name");
-  LOAD(rows_col_type, "stoolap_rows_column_type");
-  LOAD(rows_col_int,  "stoolap_rows_column_int64");
-  LOAD(rows_col_dbl,  "stoolap_rows_column_double");
-  LOAD(rows_col_text, "stoolap_rows_column_text");
-  LOAD(rows_col_bool, "stoolap_rows_column_bool");
-  LOAD(rows_col_ts,   "stoolap_rows_column_timestamp");
-  LOAD(rows_col_blob, "stoolap_rows_column_blob");
-  LOAD(rows_col_null, "stoolap_rows_column_is_null");
-  LOAD(rows_affected, "stoolap_rows_affected");
   LOAD(rows_close,    "stoolap_rows_close");
   LOAD(rows_fetch_all,"stoolap_rows_fetch_all");
   LOAD(buffer_free,   "stoolap_buffer_free");
+  LOAD(rows_errmsg,   "stoolap_rows_errmsg");
+  LOAD(rows_fetch_chunk, "stoolap_rows_fetch_chunk");
+  LOAD(exec_named,    "stoolap_exec_named");
+  LOAD(query_named,   "stoolap_query_named");
+  LOAD(tx_exec_named, "stoolap_tx_exec_named");
+  LOAD(tx_query_named,"stoolap_tx_query_named");
+  LOAD(stmt_query_all,   "stoolap_stmt_query_all");
+  LOAD(query_params_all, "stoolap_query_params_all");
+  LOAD(query_named_all,  "stoolap_query_named_all");
 
   #undef LOAD
 
+  napi_value undef;
+  napi_get_undefined(env, &undef);
+  return undef;
+}
+
+/* setRowFactoryMaker(fn): keeps lib/parse.js makeRowFactory for packed_result */
+static napi_value fn_set_row_factory_maker(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  if (row_factory_maker) napi_delete_reference(env, row_factory_maker);
+  napi_create_reference(env, argv[0], 1, &row_factory_maker);
   napi_value undef;
   napi_get_undefined(env, &undef);
   return undef;
@@ -1676,59 +1653,90 @@ static napi_value fn_db_exec(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
   StoolapDB* db;
   napi_get_value_external(env, argv[0], (void**)&db);
-
   GET_SQL_STRING(env, argv[1], sql);
-
+  ParamBind pb;
+  if (bind_positional(env, argv[2], &pb) != 0) return NULL;
   int64_t affected = 0;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.exec(db, sql, &affected);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.exec(db, sql, &affected);
-      } else if (len <= MAX_STACK_PARAMS) {
-        /* Stack-allocated fast path */
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.exec_p(db, sql, vals, (int32_t)len, &affected);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.exec_p(db, sql, vals, cnt, &affected);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.exec(db, sql, &affected);
-  }
-
+  int32_t rc = pb.count > 0
+    ? S.exec_p(db, sql, pb.vals, pb.count, &affected)
+    : S.exec(db, sql, &affected);
+  bind_release(&pb);
   if (rc != STOOLAP_OK) {
     const char* msg = S.errmsg(db);
     THROW(env, msg ? msg : "Exec error");
   }
-
   return make_changes(env, affected);
+}
+
+/* dbExecNamed(external, sql, names, values): { changes } */
+static napi_value fn_db_exec_named(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  StoolapDB* db;
+  napi_get_value_external(env, argv[0], (void**)&db);
+  GET_SQL_STRING(env, argv[1], sql);
+  NamedBind nb;
+  if (bind_named(env, argv[2], argv[3], &nb) != 0) return NULL;
+  int64_t affected = 0;
+  int32_t rc = S.exec_named(db, sql, nb.np, nb.count, &affected);
+  named_release(&nb);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(db);
+    THROW(env, msg ? msg : "Exec error");
+  }
+  return make_changes(env, affected);
+}
+
+/* dbQueryAll(external, tx?, sql, params?, mode): Array | Object | null | ArrayBuffer
+ * One FFI call: no rows handle, the buffer belongs to the database handle. */
+static napi_value fn_db_query_all(napi_env env, napi_callback_info info) {
+  size_t argc = 5;
+  napi_value argv[5];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  StoolapDB* db;
+  napi_get_value_external(env, argv[0], (void**)&db);
+  StoolapTx* tx = tx_arg(env, argv[1]);
+  GET_SQL_STRING(env, argv[2], sql);
+  int32_t mode;
+  napi_get_value_int32(env, argv[4], &mode);
+  ParamBind pb;
+  if (bind_positional(env, argv[3], &pb) != 0) return NULL;
+  const uint8_t* buf = NULL;
+  int64_t len = 0;
+  int32_t rc = S.query_params_all(db, tx, sql, pb.vals, pb.count, &buf, &len);
+  bind_release(&pb);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(db);
+    THROW(env, msg ? msg : "Query error");
+  }
+  return packed_result(env, buf, len, mode, NULL);
+}
+
+/* dbQueryNamedAll(external, tx?, sql, names, values, mode) */
+static napi_value fn_db_query_named_all(napi_env env, napi_callback_info info) {
+  size_t argc = 6;
+  napi_value argv[6];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  StoolapDB* db;
+  napi_get_value_external(env, argv[0], (void**)&db);
+  StoolapTx* tx = tx_arg(env, argv[1]);
+  GET_SQL_STRING(env, argv[2], sql);
+  int32_t mode;
+  napi_get_value_int32(env, argv[5], &mode);
+  NamedBind nb;
+  if (bind_named(env, argv[3], argv[4], &nb) != 0) return NULL;
+  const uint8_t* buf = NULL;
+  int64_t len = 0;
+  int32_t rc = S.query_named_all(db, tx, sql, nb.np, nb.count, &buf, &len);
+  named_release(&nb);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(db);
+    THROW(env, msg ? msg : "Query error");
+  }
+  return packed_result(env, buf, len, mode, NULL);
 }
 
 /* dbExecAsync(external, sql, params?): Promise<{ changes }> */
@@ -1816,65 +1824,6 @@ static napi_value fn_db_exec_simple_async(napi_env env, napi_callback_info info)
   return promise;
 }
 
-/* dbQueryBuf(external, sql, params?): ArrayBuffer | null */
-static napi_value fn_db_query_buf(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  StoolapDB* db;
-  napi_get_value_external(env, argv[0], (void**)&db);
-
-  GET_SQL_STRING(env, argv[1], sql);
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.query(db, sql, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.query(db, sql, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.query_p(db, sql, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.query_p(db, sql, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.query(db, sql, &rows);
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.errmsg(db);
-    THROW(env, msg ? msg : "Query error");
-  }
-
-  return fetch_as_arraybuffer(env, rows);
-}
-
 /* dbQueryBufAsync(external, sql, params?): Promise<ArrayBuffer | null> */
 static napi_value fn_db_query_buf_async(napi_env env, napi_callback_info info) {
   size_t argc = 3;
@@ -1911,125 +1860,7 @@ static napi_value fn_db_query_buf_async(napi_env env, napi_callback_info info) {
   return promise;
 }
 
-/* dbQuery(external, sql, params?): Array | ArrayBuffer */
-static napi_value fn_db_query(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  StoolapDB* db;
-  napi_get_value_external(env, argv[0], (void**)&db);
-
-  GET_SQL_STRING(env, argv[1], sql);
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.query(db, sql, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.query(db, sql, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.query_p(db, sql, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.query_p(db, sql, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.query(db, sql, &rows);
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.errmsg(db);
-    THROW(env, msg ? msg : "Query error");
-  }
-
-  return fetch_result(env, rows);
-}
-
-/* dbQueryOne(external, sql, params?): Object | null */
-static napi_value fn_db_query_one(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  StoolapDB* db;
-  napi_get_value_external(env, argv[0], (void**)&db);
-
-  GET_SQL_STRING(env, argv[1], sql);
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.query(db, sql, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.query(db, sql, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.query_p(db, sql, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.query_p(db, sql, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.query(db, sql, &rows);
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.errmsg(db);
-    THROW(env, msg ? msg : "Query error");
-  }
-
-  return fetch_one(env, rows);
-}
-
-/* dbPrepare(external, sql): external (returns CachedStmt wrapper) */
+/* dbPrepare(external, sql): [external, boundQueryOneInt] */
 static napi_value fn_db_prepare(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2];
@@ -2050,7 +1881,6 @@ static napi_value fn_db_prepare(napi_env env, napi_callback_info info) {
   CachedStmt* cs = calloc(1, sizeof(CachedStmt));
   cs->stmt = stmt;
   cs->has_cache = 0;
-
   napi_value ext;
   napi_create_external(env, cs, finalize_cached_stmt, NULL, &ext);
 
@@ -2067,151 +1897,43 @@ static napi_value fn_db_prepare(napi_env env, napi_callback_info info) {
   return result;
 }
 
-/* stmtExec(external, params?): { changes }
- * Uses stack allocation for ≤16 params (avoids calloc/free overhead). */
+/* stmtExec(external, params?): { changes } */
 static napi_value wrap_stmt_exec(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
   GET_STMT(env, argv[0], cs);
-  StoolapStmt* stmt = cs->stmt;
-
-  if (argc <= 1) {
-    int64_t affected = 0;
-    int32_t rc = S.stmt_exec(stmt, NULL, 0, &affected);
-    if (rc != STOOLAP_OK) {
-      const char* msg = S.stmt_errmsg(stmt);
-      THROW(env, msg ? msg : "Statement exec error");
-    }
-    return make_changes(env, affected);
-  }
-
-  /* Check if params is null/undefined */
-  napi_valuetype vt;
-  napi_typeof(env, argv[1], &vt);
-  if (vt == napi_undefined || vt == napi_null) {
-    int64_t affected = 0;
-    int32_t rc = S.stmt_exec(stmt, NULL, 0, &affected);
-    if (rc != STOOLAP_OK) {
-      const char* msg = S.stmt_errmsg(stmt);
-      THROW(env, msg ? msg : "Statement exec error");
-    }
-    return make_changes(env, affected);
-  }
-
-  uint32_t len;
-  napi_get_array_length(env, argv[1], &len);
-
-  if (len == 0) {
-    int64_t affected = 0;
-    int32_t rc = S.stmt_exec(stmt, NULL, 0, &affected);
-    if (rc != STOOLAP_OK) {
-      const char* msg = S.stmt_errmsg(stmt);
-      THROW(env, msg ? msg : "Statement exec error");
-    }
-    return make_changes(env, affected);
-  }
-
-  if (len <= MAX_STACK_PARAMS) {
-    /* Stack-allocated fast path — no calloc/free for vals and tbufs */
-    StoolapValue vals[MAX_STACK_PARAMS];
-    char* tbufs[MAX_STACK_PARAMS * 2];
-    int tbuf_cnt = 0;
-
-    for (uint32_t i = 0; i < len; i++) {
-      napi_value elem;
-      napi_get_element(env, argv[1], i, &elem);
-      if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-        THROW(env, "Failed to convert parameters");
-      }
-    }
-
-    int64_t affected = 0;
-    int32_t rc = S.stmt_exec(stmt, vals, (int32_t)len, &affected);
-    for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-
-    if (rc != STOOLAP_OK) {
-      const char* msg = S.stmt_errmsg(stmt);
-      THROW(env, msg ? msg : "Statement exec error");
-    }
-    return make_changes(env, affected);
-  }
-
-  /* Large param count — heap allocated */
-  StoolapValue* vals = NULL; int32_t cnt = 0;
-  char** tbufs = NULL; int tbuf_cnt = 0;
-  if (convert_params(env, argv[1], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-    THROW(env, "Failed to convert parameters");
-
+  ParamBind pb;
+  if (bind_positional(env, argv[1], &pb) != 0) return NULL;
   int64_t affected = 0;
-  int32_t rc = S.stmt_exec(stmt, vals, cnt, &affected);
-  free_params(vals, tbufs, tbuf_cnt);
-
+  int32_t rc = S.stmt_exec(cs->stmt, pb.vals, pb.count, &affected);
+  bind_release(&pb);
   if (rc != STOOLAP_OK) {
-    const char* msg = S.stmt_errmsg(stmt);
+    const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement exec error");
   }
-
   return make_changes(env, affected);
 }
 
-/* stmtQueryBuf(external, params?): ArrayBuffer | null */
-static napi_value wrap_stmt_query_buf(napi_env env, napi_callback_info info) {
-  size_t argc = 2;
-  napi_value argv[2];
+/* stmtQueryAll(external, params?, mode): Array | Object | null | ArrayBuffer */
+static napi_value wrap_stmt_query_all(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
   GET_STMT(env, argv[0], cs);
-  StoolapStmt* stmt = cs->stmt;
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc <= 1) {
-    rc = S.stmt_query(stmt, NULL, 0, &rows);
-  } else {
-    napi_valuetype vt;
-    napi_typeof(env, argv[1], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.stmt_query(stmt, NULL, 0, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[1], &len);
-      if (len == 0) {
-        rc = S.stmt_query(stmt, NULL, 0, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[1], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.stmt_query(stmt, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals = NULL; int32_t cnt = 0;
-        char** tbufs = NULL; int tbuf_cnt = 0;
-        if (convert_params(env, argv[1], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.stmt_query(stmt, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  }
-
+  int32_t mode;
+  napi_get_value_int32(env, argv[2], &mode);
+  ParamBind pb;
+  if (bind_positional(env, argv[1], &pb) != 0) return NULL;
+  const uint8_t* buf = NULL;
+  int64_t len = 0;
+  int32_t rc = S.stmt_query_all(cs->stmt, NULL, pb.vals, pb.count, &buf, &len);
+  bind_release(&pb);
   if (rc != STOOLAP_OK) {
-    const char* msg = S.stmt_errmsg(stmt);
+    const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
-
-  return fetch_as_arraybuffer(env, rows);
+  return packed_result(env, buf, len, mode, cs);
 }
 
 /* stmtExecAsync(external, params?): Promise<{ changes }> */
@@ -2288,157 +2010,13 @@ static napi_value wrap_stmt_query_buf_async(napi_env env, napi_callback_info inf
   return promise;
 }
 
-/* stmtQuery(external, params?): Array | ArrayBuffer
- * Uses stack allocation for ≤16 params. */
-static napi_value wrap_stmt_query(napi_env env, napi_callback_info info) {
-  size_t argc = 2;
-  napi_value argv[2];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  GET_STMT(env, argv[0], cs);
-  StoolapStmt* stmt = cs->stmt;
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc <= 1) {
-    rc = S.stmt_query(stmt, NULL, 0, &rows);
-  } else {
-    napi_valuetype vt;
-    napi_typeof(env, argv[1], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.stmt_query(stmt, NULL, 0, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[1], &len);
-      if (len == 0) {
-        rc = S.stmt_query(stmt, NULL, 0, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[1], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.stmt_query(stmt, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals = NULL; int32_t cnt = 0;
-        char** tbufs = NULL; int tbuf_cnt = 0;
-        if (convert_params(env, argv[1], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.stmt_query(stmt, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.stmt_errmsg(stmt);
-    THROW(env, msg ? msg : "Statement query error");
-  }
-
-  return fetch_result_cached(env, rows, cs);
-}
-
-/* stmtQueryOne(external, params?): Object | null
- * Uses stack allocation for ≤16 params. */
-static napi_value wrap_stmt_query_one(napi_env env, napi_callback_info info) {
-  size_t argc = 2;
-  napi_value argv[2];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  GET_STMT(env, argv[0], cs);
-  StoolapStmt* stmt = cs->stmt;
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc <= 1) {
-    rc = S.stmt_query(stmt, NULL, 0, &rows);
-  } else {
-    napi_valuetype vt;
-    napi_typeof(env, argv[1], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.stmt_query(stmt, NULL, 0, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[1], &len);
-      if (len == 0) {
-        rc = S.stmt_query(stmt, NULL, 0, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[1], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.stmt_query(stmt, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals = NULL; int32_t cnt = 0;
-        char** tbufs = NULL; int tbuf_cnt = 0;
-        if (convert_params(env, argv[1], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.stmt_query(stmt, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.stmt_errmsg(stmt);
-    THROW(env, msg ? msg : "Statement query error");
-  }
-
-  return fetch_one_direct_cached(env, rows, cs);
-}
-
-/* stmtQueryOneIntBound(intValue): Object | null
- * Bound version — CachedStmt baked into function data.
- * Eliminates napi_get_value_external call (~35ns savings per call). */
-static napi_value wrap_stmt_query_one_int_bound(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  void* data;
-  napi_get_cb_info(env, info, &argc, argv, NULL, &data);
-  CachedStmt* cs = (CachedStmt*)data;
-
-  double d;
-  napi_get_value_double(env, argv[0], &d);
-  StoolapValue val;
-  val.value_type = T_INTEGER;
-  val._padding = 0;
-  val.v.integer = (int64_t)d;
-
-  StoolapRows* rows = NULL;
-  int32_t rc = S.stmt_query(cs->stmt, &val, 1, &rows);
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.stmt_errmsg(cs->stmt);
-    THROW(env, msg ? msg : "Statement query error");
-  }
-
-  return fetch_one_direct_cached(env, rows, cs);
-}
-
 /* Helper: read numeric args from argv[start..start+count] into StoolapValue array */
 static void read_num_args(napi_env env, napi_value* argv, uint32_t start, uint32_t count, StoolapValue* vals) {
   for (uint32_t i = 0; i < count; i++) {
     double d;
     napi_get_value_double(env, argv[start + i], &d);
-    int64_t i64 = (int64_t)d;
-    if ((double)i64 == d && d >= -9007199254740992.0 && d <= 9007199254740992.0) {
+    if (is_safe_integer(d)) {
+      int64_t i64 = (int64_t)d;
       vals[i].value_type = T_INTEGER;
       vals[i]._padding = 0;
       vals[i].v.integer = i64;
@@ -2474,7 +2052,10 @@ static napi_value wrap_stmt_exec_nums(napi_env env, napi_callback_info info) {
   }
 
   napi_value result;
-  napi_create_int32(env, (int32_t)affected, &result);
+  if (affected >= -2147483648LL && affected <= 2147483647LL)
+    napi_create_int32(env, (int32_t)affected, &result);
+  else
+    napi_create_int64(env, affected, &result);
   return result;
 }
 
@@ -2484,61 +2065,39 @@ static napi_value wrap_stmt_query_nums(napi_env env, napi_callback_info info) {
   size_t argc = 17;
   napi_value argv[17];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
   GET_STMT(env, argv[0], cs);
   uint32_t len = (uint32_t)(argc - 1);
   if (len > 16) len = 16;
-
   StoolapValue vals[16];
   read_num_args(env, argv, 1, len, vals);
-
-  StoolapRows* rows = NULL;
-  int32_t rc = S.stmt_query(cs->stmt, vals, (int32_t)len, &rows);
-
+  const uint8_t* buf = NULL;
+  int64_t blen = 0;
+  int32_t rc = S.stmt_query_all(cs->stmt, NULL, vals, (int32_t)len, &buf, &blen);
   if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
-
-  return fetch_result_cached(env, rows, cs);
+  return packed_result(env, buf, blen, RESULT_ROWS, cs);
 }
 
-/* stmtQueryOneNums(external, num1, num2, ...): Object | null
- * Direct numeric args — no array unwrapping overhead. */
+/* stmtQueryOneNums(external, num1, num2, ...): Object | null */
 static napi_value wrap_stmt_query_one_nums(napi_env env, napi_callback_info info) {
   size_t argc = 17;
   napi_value argv[17];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
   GET_STMT(env, argv[0], cs);
   uint32_t len = (uint32_t)(argc - 1);
   if (len > 16) len = 16;
-
   StoolapValue vals[16];
   read_num_args(env, argv, 1, len, vals);
-
-  StoolapRows* rows = NULL;
-  int32_t rc = S.stmt_query(cs->stmt, vals, (int32_t)len, &rows);
-
+  const uint8_t* buf = NULL;
+  int64_t blen = 0;
+  int32_t rc = S.stmt_query_all(cs->stmt, NULL, vals, (int32_t)len, &buf, &blen);
   if (rc != STOOLAP_OK) {
     const char* msg = S.stmt_errmsg(cs->stmt);
     THROW(env, msg ? msg : "Statement query error");
   }
-
-  return fetch_one_direct_cached(env, rows, cs);
-}
-
-/* stmtSql(external): string */
-static napi_value wrap_stmt_sql(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  GET_STMT(env, argv[0], cs);
-  const char* sql = S.stmt_sql(cs->stmt);
-  napi_value val;
-  napi_create_string_utf8(env, sql ? sql : "", NAPI_AUTO_LENGTH, &val);
-  return val;
+  return packed_result(env, buf, blen, RESULT_ONE, cs);
 }
 
 /* stmtFinalize(external): void */
@@ -2603,57 +2162,40 @@ static napi_value wrap_tx_exec(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
   StoolapTx* tx;
   napi_get_value_external(env, argv[0], (void**)&tx);
-
   GET_SQL_STRING(env, argv[1], sql);
-
+  ParamBind pb;
+  if (bind_positional(env, argv[2], &pb) != 0) return NULL;
   int64_t affected = 0;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.tx_exec(tx, sql, &affected);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.tx_exec(tx, sql, &affected);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.tx_exec_p(tx, sql, vals, (int32_t)len, &affected);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.tx_exec_p(tx, sql, vals, cnt, &affected);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.tx_exec(tx, sql, &affected);
-  }
-
+  int32_t rc = pb.count > 0
+    ? S.tx_exec_p(tx, sql, pb.vals, pb.count, &affected)
+    : S.tx_exec(tx, sql, &affected);
+  bind_release(&pb);
   if (rc != STOOLAP_OK) {
     const char* msg = S.tx_errmsg(tx);
     THROW(env, msg ? msg : "Transaction exec error");
   }
+  return make_changes(env, affected);
+}
 
+/* txExecNamed(external, sql, names, values): { changes } */
+static napi_value wrap_tx_exec_named(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  StoolapTx* tx;
+  napi_get_value_external(env, argv[0], (void**)&tx);
+  GET_SQL_STRING(env, argv[1], sql);
+  NamedBind nb;
+  if (bind_named(env, argv[2], argv[3], &nb) != 0) return NULL;
+  int64_t affected = 0;
+  int32_t rc = S.tx_exec_named(tx, sql, nb.np, nb.count, &affected);
+  named_release(&nb);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.tx_errmsg(tx);
+    THROW(env, msg ? msg : "Transaction exec error");
+  }
   return make_changes(env, affected);
 }
 
@@ -2693,65 +2235,6 @@ static napi_value wrap_tx_exec_async(napi_env env, napi_callback_info info) {
   return promise;
 }
 
-/* txQueryBuf(external, sql, params?): ArrayBuffer | null */
-static napi_value wrap_tx_query_buf(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  StoolapTx* tx;
-  napi_get_value_external(env, argv[0], (void**)&tx);
-
-  GET_SQL_STRING(env, argv[1], sql);
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.tx_query(tx, sql, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.tx_query(tx, sql, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.tx_query_p(tx, sql, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.tx_query_p(tx, sql, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.tx_query(tx, sql, &rows);
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.tx_errmsg(tx);
-    THROW(env, msg ? msg : "Transaction query error");
-  }
-
-  return fetch_as_arraybuffer(env, rows);
-}
-
 /* txQueryBufAsync(external, sql, params?): Promise<ArrayBuffer | null> */
 static napi_value wrap_tx_query_buf_async(napi_env env, napi_callback_info info) {
   size_t argc = 3;
@@ -2788,124 +2271,6 @@ static napi_value wrap_tx_query_buf_async(napi_env env, napi_callback_info info)
   return promise;
 }
 
-/* txQuery(external, sql, params?): Array | ArrayBuffer */
-static napi_value wrap_tx_query(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  StoolapTx* tx;
-  napi_get_value_external(env, argv[0], (void**)&tx);
-
-  GET_SQL_STRING(env, argv[1], sql);
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.tx_query(tx, sql, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.tx_query(tx, sql, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.tx_query_p(tx, sql, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.tx_query_p(tx, sql, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.tx_query(tx, sql, &rows);
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.tx_errmsg(tx);
-    THROW(env, msg ? msg : "Transaction query error");
-  }
-
-  return fetch_result(env, rows);
-}
-
-/* txQueryOne(external, sql, params?): Object | null */
-static napi_value wrap_tx_query_one(napi_env env, napi_callback_info info) {
-  size_t argc = 3;
-  napi_value argv[3];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  StoolapTx* tx;
-  napi_get_value_external(env, argv[0], (void**)&tx);
-
-  GET_SQL_STRING(env, argv[1], sql);
-
-  StoolapRows* rows = NULL;
-  int32_t rc;
-
-  if (argc > 2) {
-    napi_valuetype vt;
-    napi_typeof(env, argv[2], &vt);
-    if (vt == napi_undefined || vt == napi_null) {
-      rc = S.tx_query(tx, sql, &rows);
-    } else {
-      uint32_t len;
-      napi_get_array_length(env, argv[2], &len);
-      if (len == 0) {
-        rc = S.tx_query(tx, sql, &rows);
-      } else if (len <= MAX_STACK_PARAMS) {
-        StoolapValue vals[MAX_STACK_PARAMS];
-        char* tbufs[MAX_STACK_PARAMS * 2];
-        int tbuf_cnt = 0;
-        for (uint32_t i = 0; i < len; i++) {
-          napi_value elem;
-          napi_get_element(env, argv[2], i, &elem);
-          if (js_to_value(env, elem, &vals[i], tbufs, &tbuf_cnt) != 0) {
-            for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-            THROW(env, "Failed to convert parameters");
-          }
-        }
-        rc = S.tx_query_p(tx, sql, vals, (int32_t)len, &rows);
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-      } else {
-        StoolapValue* vals; int32_t cnt;
-        char** tbufs; int tbuf_cnt;
-        if (convert_params(env, argv[2], &vals, &cnt, &tbufs, &tbuf_cnt) != 0)
-          THROW(env, "Failed to convert parameters");
-        rc = S.tx_query_p(tx, sql, vals, cnt, &rows);
-        free_params(vals, tbufs, tbuf_cnt);
-      }
-    }
-  } else {
-    rc = S.tx_query(tx, sql, &rows);
-  }
-
-  if (rc != STOOLAP_OK) {
-    const char* msg = S.tx_errmsg(tx);
-    THROW(env, msg ? msg : "Transaction query error");
-  }
-
-  return fetch_one(env, rows);
-}
-
 /* txCommit(external): void */
 static napi_value wrap_tx_commit(napi_env env, napi_callback_info info) {
   size_t argc = 1;
@@ -2916,7 +2281,10 @@ static napi_value wrap_tx_commit(napi_env env, napi_callback_info info) {
   napi_get_value_external(env, argv[0], (void**)&tx);
 
   int32_t rc = S.tx_commit(tx);
-  if (rc != STOOLAP_OK) THROW(env, "Failed to commit transaction");
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(NULL);
+    THROW(env, msg && msg[0] ? msg : "Failed to commit transaction");
+  }
 
   napi_value undef;
   napi_get_undefined(env, &undef);
@@ -2953,7 +2321,10 @@ static napi_value wrap_tx_rollback(napi_env env, napi_callback_info info) {
   napi_get_value_external(env, argv[0], (void**)&tx);
 
   int32_t rc = S.tx_rollback(tx);
-  if (rc != STOOLAP_OK) THROW(env, "Failed to rollback transaction");
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(NULL);
+    THROW(env, msg && msg[0] ? msg : "Failed to rollback transaction");
+  }
 
   napi_value undef;
   napi_get_undefined(env, &undef);
@@ -3002,14 +2373,11 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
 
   /* Prepare statement once if tx_stmt_exec is available */
   StoolapStmt* stmt = NULL;
-  int use_stmt = (S.tx_stmt_exec != NULL);
   int32_t rc;
-  if (use_stmt) {
-    rc = S.prepare(db, sql, &stmt);
-    if (rc != STOOLAP_OK) {
-      const char* msg = S.errmsg(db);
-      THROW(env, msg ? msg : "Prepare error");
-    }
+  rc = S.prepare(db, sql, &stmt);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(db);
+    THROW(env, msg ? msg : "Prepare error");
   }
 
   /* Get param count from first element — pre-allocate ONCE */
@@ -3019,7 +2387,8 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
   napi_get_array_length(env, first_arr, &param_count);
 
   StoolapValue* vals = calloc(param_count, sizeof(StoolapValue));
-  char** tbufs = calloc(param_count * 2, sizeof(char*));
+  TextArena ta;
+  ARENA_INIT(ta);
 
   int64_t total_affected = 0;
 
@@ -3028,31 +2397,25 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
     napi_get_element(env, argv[3], i, &params_arr);
 
     /* Convert params into pre-allocated buffers */
-    int tbuf_cnt = 0;
     for (uint32_t j = 0; j < param_count; j++) {
       napi_value elem;
       napi_get_element(env, params_arr, j, &elem);
-      if (js_to_value(env, elem, &vals[j], tbufs, &tbuf_cnt) != 0) {
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-        free(vals); free(tbufs);
+      if (js_to_value(env, elem, &vals[j], &ta) != 0) {
+        arena_reset(&ta);
+        free(vals);
         if (stmt) S.stmt_finalize(stmt);
         THROW(env, "Failed to convert parameters");
       }
     }
 
     int64_t affected = 0;
-    if (use_stmt) {
-      rc = S.tx_stmt_exec(tx, stmt, vals, (int32_t)param_count, &affected);
-    } else {
-      rc = S.tx_exec_p(tx, sql, vals, (int32_t)param_count, &affected);
-    }
+    rc = S.tx_stmt_exec(tx, stmt, vals, (int32_t)param_count, &affected);
 
-    /* Free only text buffers, keep vals/tbufs arrays for reuse */
-    for (int k = 0; k < tbuf_cnt; k++) { free(tbufs[k]); tbufs[k] = NULL; }
+    arena_reset(&ta);
 
     if (rc != STOOLAP_OK) {
       ERR_SAVE(S.tx_errmsg(tx), "Transaction batch exec error");
-      free(vals); free(tbufs);
+      free(vals);
       if (stmt) S.stmt_finalize(stmt);
       THROW(env, _eb);
     }
@@ -3061,67 +2424,7 @@ static napi_value wrap_tx_exec_batch(napi_env env, napi_callback_info info) {
   }
 
   free(vals);
-  free(tbufs);
   if (stmt) S.stmt_finalize(stmt);
-  return make_changes(env, total_affected);
-}
-
-/* stmtExecBatch(external, paramsArrayOfArrays): { changes }
- * Batch exec via prepared statement — pre-allocated buffers, loops in C. */
-static napi_value wrap_stmt_exec_batch(napi_env env, napi_callback_info info) {
-  size_t argc = 2;
-  napi_value argv[2];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  GET_STMT(env, argv[0], cs);
-  StoolapStmt* stmt = cs->stmt;
-
-  uint32_t batch_len;
-  napi_get_array_length(env, argv[1], &batch_len);
-  if (batch_len == 0) return make_changes(env, 0);
-
-  /* Get param count from first element — pre-allocate ONCE */
-  napi_value first_arr;
-  napi_get_element(env, argv[1], 0, &first_arr);
-  uint32_t param_count;
-  napi_get_array_length(env, first_arr, &param_count);
-
-  StoolapValue* vals = calloc(param_count, sizeof(StoolapValue));
-  char** tbufs = calloc(param_count * 2, sizeof(char*));
-
-  int64_t total_affected = 0;
-
-  for (uint32_t i = 0; i < batch_len; i++) {
-    napi_value params_arr;
-    napi_get_element(env, argv[1], i, &params_arr);
-
-    int tbuf_cnt = 0;
-    for (uint32_t j = 0; j < param_count; j++) {
-      napi_value elem;
-      napi_get_element(env, params_arr, j, &elem);
-      if (js_to_value(env, elem, &vals[j], tbufs, &tbuf_cnt) != 0) {
-        for (int k = 0; k < tbuf_cnt; k++) free(tbufs[k]);
-        free(vals); free(tbufs);
-        THROW(env, "Failed to convert parameters");
-      }
-    }
-
-    int64_t affected = 0;
-    int32_t rc = S.stmt_exec(stmt, vals, (int32_t)param_count, &affected);
-
-    for (int k = 0; k < tbuf_cnt; k++) { free(tbufs[k]); tbufs[k] = NULL; }
-
-    if (rc != STOOLAP_OK) {
-      free(vals); free(tbufs);
-      const char* msg = S.stmt_errmsg(stmt);
-      THROW(env, msg ? msg : "Statement batch exec error");
-    }
-
-    total_affected += affected;
-  }
-
-  free(vals);
-  free(tbufs);
   return make_changes(env, total_affected);
 }
 
@@ -3136,6 +2439,8 @@ static napi_value wrap_stmt_exec_batch(napi_env env, napi_callback_info info) {
 #define PBUF_TEXT  3
 #define PBUF_BOOL  4
 #define PBUF_I64   5
+#define PBUF_TS    6  /* i64 nanoseconds since the epoch */
+#define PBUF_BLOB  7  /* u32 len + bytes */
 
 static int decode_params_buf(const uint8_t* buf, size_t buf_len,
                              StoolapValue* vals, int max_params,
@@ -3161,11 +2466,10 @@ static int decode_params_buf(const uint8_t* buf, size_t buf_len,
       case PBUF_F64: {
         if (ptr + 8 > end) return -1;
         double d; memcpy(&d, ptr, 8); ptr += 8;
-        int64_t i64 = (int64_t)d;
-        if ((double)i64 == d && d >= -9007199254740992.0 && d <= 9007199254740992.0) {
+        if (is_safe_integer(d)) {
           vals[count].value_type = T_INTEGER;
           vals[count]._padding = 0;
-          vals[count].v.integer = i64;
+          vals[count].v.integer = (int64_t)d;
         } else {
           vals[count].value_type = T_FLOAT;
           vals[count]._padding = 0;
@@ -3198,6 +2502,25 @@ static int decode_params_buf(const uint8_t* buf, size_t buf_len,
         vals[count].v.integer = i64;
         break;
       }
+      case PBUF_TS: {
+        if (ptr + 8 > end) return -1;
+        int64_t nanos; memcpy(&nanos, ptr, 8); ptr += 8;
+        vals[count].value_type = T_TIMESTAMP;
+        vals[count]._padding = 0;
+        vals[count].v.timestamp_nanos = nanos;
+        break;
+      }
+      case PBUF_BLOB: {
+        if (ptr + 4 > end) return -1;
+        uint32_t len; memcpy(&len, ptr, 4); ptr += 4;
+        if (ptr + len > end) return -1;
+        vals[count].value_type = T_BLOB;
+        vals[count]._padding = 0;
+        vals[count].v.blob.ptr = ptr;
+        vals[count].v.blob.len = (int64_t)len;
+        ptr += len;
+        break;
+      }
       default: return -1;
     }
     count++;
@@ -3219,39 +2542,40 @@ static napi_value wrap_db_exec_batch_buf(napi_env env, napi_callback_info info) 
   napi_get_buffer_info(env, argv[2], &buf_data, &buf_len);
   const uint8_t* ptr = (const uint8_t*)buf_data;
   const uint8_t* end = ptr + buf_len;
-  if (ptr + 5 > end) THROW(env, "Batch buffer too short");
+  if (ptr + 6 > end) THROW(env, "Batch buffer too short");
   uint32_t row_count; memcpy(&row_count, ptr, 4); ptr += 4;
-  uint8_t ppr = *ptr++;
+  uint16_t ppr; memcpy(&ppr, ptr, 2); ptr += 2;
   if (row_count == 0) return make_changes(env, 0);
+  StoolapValue stack_vals[MAX_STACK_PARAMS];
+  StoolapValue* vals = ppr <= MAX_STACK_PARAMS ? stack_vals : malloc(ppr * sizeof(StoolapValue));
+  if (!vals) THROW(env, "Out of memory");
+#define BATCH_VALS_RELEASE() do { if (vals != stack_vals) free(vals); } while (0)
   StoolapTx* tx = NULL;
   int32_t rc = S.begin(db, &tx);
-  if (rc != STOOLAP_OK) { const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Begin error"); }
+  if (rc != STOOLAP_OK) { BATCH_VALS_RELEASE(); const char* msg = S.errmsg(db); THROW(env, msg ? msg : "Begin error"); }
   StoolapStmt* stmt = NULL;
-  int use_stmt = (S.tx_stmt_exec != NULL);
-  if (use_stmt) {
-    rc = S.prepare(db, sql, &stmt);
-    if (rc != STOOLAP_OK) { ERR_SAVE(S.errmsg(db), "Prepare error"); S.tx_rollback(tx); THROW(env, _eb); }
-  }
+  rc = S.prepare(db, sql, &stmt);
+  if (rc != STOOLAP_OK) { ERR_SAVE(S.errmsg(db), "Prepare error"); S.tx_rollback(tx); BATCH_VALS_RELEASE(); THROW(env, _eb); }
   int64_t total = 0;
   for (uint32_t i = 0; i < row_count; i++) {
-    StoolapValue vals[MAX_STACK_PARAMS];
     size_t consumed = 0;
     int decoded = decode_params_buf(ptr, (size_t)(end - ptr), vals, ppr, &consumed);
-    if (decoded != ppr) { if (stmt) S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, "Batch param decode error"); }
+    if (decoded != ppr) { S.stmt_finalize(stmt); S.tx_rollback(tx); BATCH_VALS_RELEASE(); THROW(env, "Batch param decode error"); }
     ptr += consumed;
     int64_t affected = 0;
-    if (use_stmt) {
-      rc = S.tx_stmt_exec(tx, stmt, vals, decoded, &affected);
-    } else {
-      rc = S.tx_exec_p(tx, sql, vals, decoded, &affected);
-    }
-    if (rc != STOOLAP_OK) { ERR_SAVE(S.tx_errmsg(tx), "Batch exec error"); if (stmt) S.stmt_finalize(stmt); S.tx_rollback(tx); THROW(env, _eb); }
+    rc = S.tx_stmt_exec(tx, stmt, vals, decoded, &affected);
+    if (rc != STOOLAP_OK) { ERR_SAVE(S.tx_errmsg(tx), "Batch exec error"); S.stmt_finalize(stmt); S.tx_rollback(tx); BATCH_VALS_RELEASE(); THROW(env, _eb); }
     total += affected;
   }
-  if (stmt) S.stmt_finalize(stmt);
+  S.stmt_finalize(stmt);
+  BATCH_VALS_RELEASE();
   rc = S.tx_commit(tx);
-  if (rc != STOOLAP_OK) { THROW(env, "Commit error"); }
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.errmsg(NULL);
+    THROW(env, msg && msg[0] ? msg : "Commit error");
+  }
   return make_changes(env, total);
+#undef BATCH_VALS_RELEASE
 }
 
 /* stmtExecBatchBuf(external, buffer): { changes }
@@ -3269,27 +2593,254 @@ static napi_value wrap_stmt_exec_batch_buf(napi_env env, napi_callback_info info
   const uint8_t* ptr = (const uint8_t*)buf_data;
   const uint8_t* end = ptr + buf_len;
 
-  if (ptr + 5 > end) THROW(env, "Batch buffer too short");
+  if (ptr + 6 > end) THROW(env, "Batch buffer too short");
   uint32_t row_count; memcpy(&row_count, ptr, 4); ptr += 4;
-  uint8_t ppr = *ptr++;
+  uint16_t ppr; memcpy(&ppr, ptr, 2); ptr += 2;
   if (row_count == 0) return make_changes(env, 0);
+  StoolapValue stack_vals[MAX_STACK_PARAMS];
+  StoolapValue* vals = ppr <= MAX_STACK_PARAMS ? stack_vals : malloc(ppr * sizeof(StoolapValue));
+  if (!vals) THROW(env, "Out of memory");
 
   int64_t total = 0;
   for (uint32_t i = 0; i < row_count; i++) {
-    StoolapValue vals[MAX_STACK_PARAMS];
     size_t consumed = 0;
     int decoded = decode_params_buf(ptr, (size_t)(end - ptr), vals, ppr, &consumed);
-    if (decoded != ppr) THROW(env, "Batch param decode error");
+    if (decoded != ppr) { if (vals != stack_vals) free(vals); THROW(env, "Batch param decode error"); }
     ptr += consumed;
     int64_t affected = 0;
     int32_t rc = S.stmt_exec(stmt, vals, decoded, &affected);
     if (rc != STOOLAP_OK) {
-      const char* msg = S.stmt_errmsg(stmt);
-      THROW(env, msg ? msg : "Statement batch exec error");
+      ERR_SAVE(S.stmt_errmsg(stmt), "Statement batch exec error");
+      if (vals != stack_vals) free(vals);
+      THROW(env, _eb);
     }
     total += affected;
   }
+  if (vals != stack_vals) free(vals);
   return make_changes(env, total);
+}
+
+/* ---- Row cursor: a StoolapRows handle read in packed chunks ---- */
+/* The external's payload: rows is NULL once the cursor was closed, so the
+ * finalizer does not close it a second time. */
+typedef struct {
+  StoolapRows* rows;
+} RowsHandle;
+
+static void finalize_rows_handle(napi_env env, void* data, void* hint) {
+  (void)env; (void)hint;
+  RowsHandle* h = (RowsHandle*)data;
+  if (h->rows) S.rows_close(h->rows);
+  free(h);
+}
+
+static napi_value rows_external(napi_env env, StoolapRows* rows) {
+  RowsHandle* h = malloc(sizeof(RowsHandle));
+  if (!h) { S.rows_close(rows); THROW(env, "Out of memory"); }
+  h->rows = rows;
+  napi_value ext;
+  napi_create_external(env, h, finalize_rows_handle, NULL, &ext);
+  return ext;
+}
+
+/* rowsOpen(db, tx?, sql, params?): external */
+static napi_value fn_rows_open(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  StoolapDB* db;
+  napi_get_value_external(env, argv[0], (void**)&db);
+  StoolapTx* tx = tx_arg(env, argv[1]);
+  GET_SQL_STRING(env, argv[2], sql);
+  ParamBind pb;
+  if (bind_positional(env, argv[3], &pb) != 0) return NULL;
+  StoolapRows* rows = NULL;
+  int32_t rc;
+  if (tx) {
+    rc = pb.count > 0 ? S.tx_query_p(tx, sql, pb.vals, pb.count, &rows) : S.tx_query(tx, sql, &rows);
+  } else {
+    rc = pb.count > 0 ? S.query_p(db, sql, pb.vals, pb.count, &rows) : S.query(db, sql, &rows);
+  }
+  bind_release(&pb);
+  if (rc != STOOLAP_OK) {
+    const char* msg = tx ? S.tx_errmsg(tx) : S.errmsg(db);
+    THROW(env, msg ? msg : "Query error");
+  }
+  return rows_external(env, rows);
+}
+
+/* rowsOpenNamed(db, tx?, sql, names, values): external */
+static napi_value fn_rows_open_named(napi_env env, napi_callback_info info) {
+  size_t argc = 5;
+  napi_value argv[5];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  StoolapDB* db;
+  napi_get_value_external(env, argv[0], (void**)&db);
+  StoolapTx* tx = tx_arg(env, argv[1]);
+  GET_SQL_STRING(env, argv[2], sql);
+  NamedBind nb;
+  if (bind_named(env, argv[3], argv[4], &nb) != 0) return NULL;
+  StoolapRows* rows = NULL;
+  int32_t rc = tx
+    ? S.tx_query_named(tx, sql, nb.np, nb.count, &rows)
+    : S.query_named(db, sql, nb.np, nb.count, &rows);
+  named_release(&nb);
+  if (rc != STOOLAP_OK) {
+    const char* msg = tx ? S.tx_errmsg(tx) : S.errmsg(db);
+    THROW(env, msg ? msg : "Query error");
+  }
+  return rows_external(env, rows);
+}
+
+/* rowsOpenStmt(external, params?): external */
+static napi_value wrap_rows_open_stmt(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  GET_STMT(env, argv[0], cs);
+  ParamBind pb;
+  if (bind_positional(env, argv[1], &pb) != 0) return NULL;
+  StoolapRows* rows = NULL;
+  int32_t rc = S.stmt_query(cs->stmt, pb.vals, pb.count, &rows);
+  bind_release(&pb);
+  if (rc != STOOLAP_OK) {
+    const char* msg = S.stmt_errmsg(cs->stmt);
+    THROW(env, msg ? msg : "Statement query error");
+  }
+  return rows_external(env, rows);
+}
+
+/* rowsChunk(external, maxRows, buffer?): ArrayBuffer | null
+ * Packs up to maxRows rows into `buffer` when it is large enough, else into
+ * a new ArrayBuffer sized to grow; the caller keeps the returned buffer for
+ * the next call. null once the result is exhausted. */
+static napi_value fn_rows_chunk(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  RowsHandle* h;
+  napi_get_value_external(env, argv[0], (void**)&h);
+  StoolapRows* rows = h->rows;
+  int32_t max_rows;
+  napi_get_value_int32(env, argv[1], &max_rows);
+  const uint8_t* buf = NULL;
+  int64_t len = 0;
+  int32_t n = 0;
+  if (rows && S.rows_fetch_chunk(rows, max_rows, &buf, &len, &n) != STOOLAP_OK) {
+    const char* msg = S.rows_errmsg(rows);
+    THROW(env, msg ? msg : "Row fetch error");
+  }
+  if (n == 0) {
+    napi_value null_val;
+    napi_get_null(env, &null_val);
+    return null_val;
+  }
+  napi_value ab = argv[2];
+  void* data = NULL;
+  size_t cap = 0;
+  bool is_ab = false;
+  napi_is_arraybuffer(env, ab, &is_ab);
+  if (is_ab) napi_get_arraybuffer_info(env, ab, &data, &cap);
+  if (!is_ab || cap < (size_t)len) {
+    cap = (size_t)len < 16384 ? 16384 : (size_t)len * 2;
+    napi_create_arraybuffer(env, cap, &data, &ab);
+  }
+  memcpy(data, buf, (size_t)len);
+  return ab;
+}
+
+typedef struct {
+  AsyncBase base;
+  RowsHandle* h;
+  int32_t max_rows;
+  uint8_t* buf;
+  int64_t len;
+} AsyncChunkTask;
+
+static void execute_rows_chunk_async(napi_env env, void* data) {
+  (void)env;
+  AsyncChunkTask* task = (AsyncChunkTask*)data;
+  const uint8_t* buf = NULL;
+  int64_t len = 0;
+  int32_t n = 0;
+  StoolapRows* rows = task->h->rows;
+  if (!rows) return;
+  if (S.rows_fetch_chunk(rows, task->max_rows, &buf, &len, &n) != STOOLAP_OK) {
+    task->base.error = dup_cstr(S.rows_errmsg(rows), "Row fetch error");
+    return;
+  }
+  if (n == 0) return;
+  task->buf = malloc((size_t)len);
+  if (!task->buf) { task->base.error = dup_cstr(NULL, "Out of memory"); return; }
+  memcpy(task->buf, buf, (size_t)len);
+  task->len = len;
+}
+
+static void finalize_malloc_buffer(napi_env env, void* data, void* hint) {
+  (void)env; (void)hint;
+  free(data);
+}
+
+static void complete_rows_chunk_async(napi_env env, napi_status status, void* data) {
+  AsyncChunkTask* task = (AsyncChunkTask*)data;
+  if (status != napi_ok && !task->base.error) {
+    task->base.error = dup_cstr(NULL, "Row fetch cancelled");
+  }
+  if (task->base.error) {
+    free(task->buf);
+    reject_async_error(env, &task->base, "Row fetch error");
+  } else if (!task->buf) {
+    napi_value null_val;
+    napi_get_null(env, &null_val);
+    napi_resolve_deferred(env, task->base.deferred, null_val);
+  } else {
+    napi_value ab;
+    if (napi_create_external_arraybuffer(env, task->buf, (size_t)task->len,
+                                         finalize_malloc_buffer, NULL, &ab) != napi_ok) {
+      void* copy;
+      napi_create_arraybuffer(env, (size_t)task->len, &copy, &ab);
+      memcpy(copy, task->buf, (size_t)task->len);
+      free(task->buf);
+    }
+    napi_resolve_deferred(env, task->base.deferred, ab);
+  }
+  napi_delete_async_work(env, task->base.work);
+  free(task->base.error);
+  free(task);
+}
+
+/* rowsChunkAsync(external, maxRows): Promise<ArrayBuffer | null> */
+static napi_value fn_rows_chunk_async(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  AsyncChunkTask* task = calloc(1, sizeof(AsyncChunkTask));
+  if (!task) THROW(env, "Out of memory");
+  napi_get_value_external(env, argv[0], (void**)&task->h);
+  napi_get_value_int32(env, argv[1], &task->max_rows);
+  napi_value promise = queue_async_work(
+    env, task, &task->base, "rowsChunkAsync", execute_rows_chunk_async, complete_rows_chunk_async);
+  if (!promise) {
+    free(task);
+    THROW(env, "Failed to queue rowsChunkAsync");
+  }
+  return promise;
+}
+
+/* rowsClose(external): closes the rows handle; later calls on it are no-ops */
+static napi_value fn_rows_cursor_close(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  RowsHandle* h;
+  napi_get_value_external(env, argv[0], (void**)&h);
+  if (h->rows) {
+    S.rows_close(h->rows);
+    h->rows = NULL;
+  }
+  napi_value undef;
+  napi_get_undefined(env, &undef);
+  return undef;
 }
 
 /* ============================================================
@@ -3304,6 +2855,7 @@ static napi_value wrap_stmt_exec_batch_buf(napi_env env, napi_callback_info info
 
 static napi_value Init(napi_env env, napi_value exports) {
   EXPORT_FN(env, exports, "loadLibrary",   fn_load_library);
+  EXPORT_FN(env, exports, "setRowFactoryMaker", fn_set_row_factory_maker);
   EXPORT_FN(env, exports, "dbOpen",        fn_db_open);
   EXPORT_FN(env, exports, "dbOpenAsync",   fn_db_open_async);
   EXPORT_FN(env, exports, "dbClone",       fn_db_clone);
@@ -3311,24 +2863,20 @@ static napi_value Init(napi_env env, napi_value exports) {
   EXPORT_FN(env, exports, "dbCloseAsync",  fn_db_close_async);
   EXPORT_FN(env, exports, "dbExec",        fn_db_exec);
   EXPORT_FN(env, exports, "dbExecAsync",   fn_db_exec_async);
+  EXPORT_FN(env, exports, "dbExecNamed",   fn_db_exec_named);
+  EXPORT_FN(env, exports, "dbQueryAll",    fn_db_query_all);
+  EXPORT_FN(env, exports, "dbQueryNamedAll", fn_db_query_named_all);
   EXPORT_FN(env, exports, "dbExecSimple",  fn_db_exec_simple);
   EXPORT_FN(env, exports, "dbExecSimpleAsync", fn_db_exec_simple_async);
-  EXPORT_FN(env, exports, "dbQueryBuf",    fn_db_query_buf);
   EXPORT_FN(env, exports, "dbQueryBufAsync", fn_db_query_buf_async);
-  EXPORT_FN(env, exports, "dbQuery",       fn_db_query);
-  EXPORT_FN(env, exports, "dbQueryOne",    fn_db_query_one);
   EXPORT_FN(env, exports, "dbPrepare",     fn_db_prepare);
   EXPORT_FN(env, exports, "stmtExec",      wrap_stmt_exec);
   EXPORT_FN(env, exports, "stmtExecAsync", wrap_stmt_exec_async);
-  EXPORT_FN(env, exports, "stmtQueryBuf",  wrap_stmt_query_buf);
+  EXPORT_FN(env, exports, "stmtQueryAll",  wrap_stmt_query_all);
   EXPORT_FN(env, exports, "stmtQueryBufAsync", wrap_stmt_query_buf_async);
-  EXPORT_FN(env, exports, "stmtQuery",     wrap_stmt_query);
-  EXPORT_FN(env, exports, "stmtQueryOne",  wrap_stmt_query_one);
-  EXPORT_FN(env, exports, "stmtSql",       wrap_stmt_sql);
   EXPORT_FN(env, exports, "stmtExecNums",     wrap_stmt_exec_nums);
   EXPORT_FN(env, exports, "stmtQueryNums",    wrap_stmt_query_nums);
   EXPORT_FN(env, exports, "stmtQueryOneNums", wrap_stmt_query_one_nums);
-  EXPORT_FN(env, exports, "stmtExecBatch",    wrap_stmt_exec_batch);
   EXPORT_FN(env, exports, "stmtExecBatchBuf", wrap_stmt_exec_batch_buf);
   EXPORT_FN(env, exports, "stmtFinalize",  wrap_stmt_finalize);
   EXPORT_FN(env, exports, "dbExecBatchBuf",   wrap_db_exec_batch_buf);
@@ -3336,15 +2884,19 @@ static napi_value Init(napi_env env, napi_value exports) {
   EXPORT_FN(env, exports, "txBeginAsync",  fn_tx_begin_async);
   EXPORT_FN(env, exports, "txExec",        wrap_tx_exec);
   EXPORT_FN(env, exports, "txExecAsync",   wrap_tx_exec_async);
+  EXPORT_FN(env, exports, "txExecNamed",   wrap_tx_exec_named);
   EXPORT_FN(env, exports, "txExecBatch",   wrap_tx_exec_batch);
-  EXPORT_FN(env, exports, "txQueryBuf",    wrap_tx_query_buf);
   EXPORT_FN(env, exports, "txQueryBufAsync", wrap_tx_query_buf_async);
-  EXPORT_FN(env, exports, "txQuery",       wrap_tx_query);
-  EXPORT_FN(env, exports, "txQueryOne",    wrap_tx_query_one);
   EXPORT_FN(env, exports, "txCommit",      wrap_tx_commit);
   EXPORT_FN(env, exports, "txCommitAsync", wrap_tx_commit_async);
   EXPORT_FN(env, exports, "txRollback",    wrap_tx_rollback);
   EXPORT_FN(env, exports, "txRollbackAsync", wrap_tx_rollback_async);
+  EXPORT_FN(env, exports, "rowsOpen",      fn_rows_open);
+  EXPORT_FN(env, exports, "rowsOpenNamed", fn_rows_open_named);
+  EXPORT_FN(env, exports, "rowsOpenStmt",  wrap_rows_open_stmt);
+  EXPORT_FN(env, exports, "rowsChunk",     fn_rows_chunk);
+  EXPORT_FN(env, exports, "rowsChunkAsync", fn_rows_chunk_async);
+  EXPORT_FN(env, exports, "rowsClose",     fn_rows_cursor_close);
   return exports;
 }
 

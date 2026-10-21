@@ -2044,6 +2044,356 @@ describe("Database clone", () => {
 // Declaration coverage
 // ============================================================
 
+describe("Native named parameters", () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(":memory:");
+    await db.exec(
+      "CREATE TABLE nn (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)",
+    );
+    await db.execute("INSERT INTO nn VALUES (:id, :name, :age)", {
+      id: 1,
+      name: "Alice",
+      age: 30,
+    });
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it("should execute a prepared statement with named params, sync and async", async () => {
+    const stmt = db.prepare("INSERT INTO nn VALUES (:id, :name, :age)");
+    assert.equal(stmt.executeSync({ id: 2, name: "Bob", age: 25 }).changes, 1);
+    const r = await stmt.execute({ id: 3, name: "Carol", age: 41 });
+    assert.equal(r.changes, 1);
+    stmt.finalize();
+    assert.equal(db.queryOneSync("SELECT COUNT(*) AS n FROM nn").n, 3);
+  });
+
+  it("should query a prepared statement with named params in every form", async () => {
+    const stmt = db.prepare("SELECT id, name FROM nn WHERE age >= :min ORDER BY id");
+    assert.deepEqual(stmt.querySync({ min: 30 }), [
+      { id: 1, name: "Alice" },
+      { id: 3, name: "Carol" },
+    ]);
+    assert.deepEqual(await stmt.query({ min: 41 }), [{ id: 3, name: "Carol" }]);
+    assert.deepEqual(stmt.queryOneSync({ min: 30 }), { id: 1, name: "Alice" });
+    assert.deepEqual(await stmt.queryOne({ min: 99 }), null);
+    assert.deepEqual(stmt.queryRawSync({ min: 41 }), {
+      columns: ["id", "name"],
+      rows: [[3, "Carol"]],
+    });
+    assert.deepEqual((await stmt.queryRaw({ min: 41 })).rows, [[3, "Carol"]]);
+    stmt.finalize();
+  });
+
+  it("should ignore extra keys and bind a missing name as NULL", () => {
+    const row = db.queryOneSync("SELECT :x AS x, :missing AS m", {
+      x: 7,
+      extra: "unused",
+    });
+    assert.deepEqual(row, { x: 7, m: null });
+  });
+
+  it("should keep a :name inside a string literal of a prepared statement", () => {
+    const stmt = db.prepare("SELECT ':city' AS literal_value, :city AS bound_value");
+    assert.deepEqual(stmt.queryOneSync({ city: "NYC" }), {
+      literal_value: ":city",
+      bound_value: "NYC",
+    });
+    stmt.finalize();
+  });
+
+  it("should bind a name that appears twice", () => {
+    const row = db.queryOneSync("SELECT :n AS a, :n * 2 AS b", { n: 21 });
+    assert.deepEqual(row, { a: 21, b: 42 });
+  });
+
+  it("should bind named params inside a transaction, sync and async", async () => {
+    const tx = db.beginSync();
+    tx.executeSync("UPDATE nn SET age = :age WHERE id = :id", { age: 31, id: 1 });
+    assert.equal(tx.queryOneSync("SELECT age FROM nn WHERE id = :id", { id: 1 }).age, 31);
+    tx.rollbackSync();
+
+    const atx = await db.begin();
+    await atx.execute("UPDATE nn SET age = :age WHERE id = :id", { age: 32, id: 1 });
+    assert.equal((await atx.queryOne("SELECT age FROM nn WHERE id = :id", { id: 1 })).age, 32);
+    await atx.rollback();
+    assert.equal(db.queryOneSync("SELECT age FROM nn WHERE id = 1").age, 30);
+  });
+});
+
+describe("Row cursor (iterate)", () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(":memory:");
+    await db.exec("CREATE TABLE big (id INTEGER PRIMARY KEY, name TEXT, score FLOAT)");
+    const rows = [];
+    for (let i = 1; i <= 1000; i++) rows.push([i, `name${i}`, i / 2]);
+    db.executeBatchSync("INSERT INTO big VALUES ($1, $2, $3)", rows);
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it("should iterate every row in order, synchronously", () => {
+    let expected = 1;
+    let sum = 0;
+    for (const row of db.iterate("SELECT * FROM big ORDER BY id")) {
+      assert.equal(row.id, expected++);
+      sum += row.score;
+    }
+    assert.equal(expected, 1001);
+    assert.equal(sum, 250250);
+  });
+
+  it("should iterate with for await", async () => {
+    const ids = [];
+    for await (const row of db.iterate("SELECT id FROM big WHERE id > $1 ORDER BY id", [995])) {
+      ids.push(row.id);
+    }
+    assert.deepEqual(ids, [996, 997, 998, 999, 1000]);
+  });
+
+  it("should accept named params", async () => {
+    let n = 0;
+    for await (const row of db.iterate("SELECT id FROM big WHERE id <= :lim", { lim: 300 })) n++;
+    assert.equal(n, 300);
+  });
+
+  it("should close on early break and on a throw inside the loop", async () => {
+    const cursor = db.iterate("SELECT id FROM big");
+    for (const row of cursor) {
+      if (row.id === 3) break;
+    }
+    assert.equal(cursor.closed, true);
+
+    const cursor2 = db.iterate("SELECT id FROM big");
+    await assert.rejects(async () => {
+      for await (const row of cursor2) throw new Error("stop");
+    }, /stop/);
+    assert.equal(cursor2.closed, true);
+  });
+
+  it("should iterate a prepared statement, positional and named", () => {
+    const stmt = db.prepare("SELECT id FROM big WHERE id BETWEEN :lo AND :hi ORDER BY id");
+    const ids = [];
+    for (const row of stmt.iterate({ lo: 10, hi: 12 })) ids.push(row.id);
+    assert.deepEqual(ids, [10, 11, 12]);
+    const pos = db.prepare("SELECT id FROM big WHERE id = $1");
+    assert.deepEqual([...pos.iterate([5])], [{ id: 5 }]);
+    stmt.finalize();
+    pos.finalize();
+  });
+
+  it("should run inside a transaction and be closed by commit", () => {
+    const tx = db.beginSync();
+    tx.executeSync("INSERT INTO big VALUES (1001, 'tx', 0)");
+    let n = 0;
+    for (const row of tx.iterate("SELECT id FROM big WHERE id > $1", [1000])) n++;
+    assert.equal(n, 1);
+    const open = tx.iterate("SELECT id FROM big");
+    tx.rollbackSync();
+    assert.equal(open.closed, true);
+    assert.equal(db.queryOneSync("SELECT COUNT(*) AS n FROM big").n, 1000);
+  });
+
+  it("should yield nothing for an empty result", () => {
+    assert.deepEqual([...db.iterate("SELECT * FROM big WHERE id > 5000")], []);
+  });
+
+  it("should throw on invalid SQL", () => {
+    assert.throws(() => db.iterate("SELECT * FROM nope"), /nope/);
+  });
+
+  it("should be closed when the database closes", () => {
+    const other = Database.openSync(":memory:");
+    other.execSync("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+    const cursor = other.iterate("SELECT * FROM t");
+    other.closeSync();
+    assert.equal(cursor.closed, true);
+    assert.deepEqual([...cursor], []);
+  });
+});
+
+describe("Review regressions", () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(":memory:");
+    await db.exec("CREATE TABLE rr (id INTEGER PRIMARY KEY, score FLOAT, name TEXT)");
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it("should run batches with more than 16 params per row", () => {
+    const cols = Array.from({ length: 20 }, (_, i) => `c${i} INTEGER`).join(", ");
+    db.execSync(`CREATE TABLE wide20 (${cols})`);
+    const ph = Array.from({ length: 20 }, (_, i) => `$${i + 1}`).join(", ");
+    const rows = [];
+    for (let r = 0; r < 50; r++) rows.push(Array.from({ length: 20 }, (_, i) => r * 100 + i));
+    assert.equal(db.executeBatchSync(`INSERT INTO wide20 VALUES (${ph})`, rows).changes, 50);
+    const stmt = db.prepare(`INSERT INTO wide20 VALUES (${ph})`);
+    assert.equal(stmt.executeBatchSync(rows.map((r) => r.map((v) => v + 1000000))).changes, 50);
+    stmt.finalize();
+    assert.equal(db.queryOneSync("SELECT COUNT(*) AS n, MAX(c19) AS m FROM wide20").m, 1004919);
+
+    const cols300 = Array.from({ length: 300 }, (_, i) => `c${i} INTEGER`).join(", ");
+    db.execSync(`CREATE TABLE wide300 (${cols300})`);
+    const ph300 = Array.from({ length: 300 }, (_, i) => `$${i + 1}`).join(", ");
+    const row300 = Array.from({ length: 300 }, (_, i) => i);
+    assert.equal(db.executeBatchSync(`INSERT INTO wide300 VALUES (${ph300})`, [row300, row300]).changes, 2);
+    assert.equal(db.queryOneSync("SELECT c299 FROM wide300 LIMIT 1").c299, 299);
+  });
+
+  it("should reject SQL that is not a string with a TypeError", () => {
+    for (const bad of [undefined, null, 123, {}, []]) {
+      assert.throws(() => db.querySync(bad), TypeError);
+      assert.throws(() => db.executeSync(bad), TypeError);
+      assert.throws(() => db.queryOneSync(bad), TypeError);
+      assert.throws(() => db.iterate(bad), TypeError);
+      assert.throws(() => db.prepare(bad), TypeError);
+    }
+  });
+
+  it("should keep a float in a single-param prepared queryOne", () => {
+    db.executeSync("INSERT INTO rr VALUES (1, 1.0, 'one'), (2, 1.5, 'one-and-a-half')");
+    const stmt = db.prepare("SELECT id FROM rr WHERE score = $1");
+    assert.deepEqual(stmt.queryOneSync([1.5]), { id: 2 });
+    assert.deepEqual(stmt.queryOneSync([1]), { id: 1 });
+    assert.deepEqual(stmt.queryOneSync([NaN]), null);
+    stmt.finalize();
+    assert.deepEqual(db.queryOneSync("SELECT $1 AS v", [1.5]), { v: 1.5 });
+  });
+
+  it("should not truncate multibyte strings at the text arena boundary", () => {
+    for (const pad of [2030, 2040, 2044, 2045, 2046, 2047]) {
+      const a = "y".repeat(pad);
+      const b = "ab€€";
+      const row = db.queryOneSync("SELECT $1 AS a, $2 AS b", [a, b]);
+      assert.equal(row.a, a);
+      assert.equal(row.b, b, `pad ${pad}`);
+      const one = "y".repeat(pad) + "€";
+      assert.equal(db.queryOneSync("SELECT :s AS s", { s: one }).s, one, `named pad ${pad}`);
+    }
+    for (const n of [505, 509, 510, 511, 512, 513, 514]) {
+      const lit = "z".repeat(n) + "€";
+      assert.equal(db.queryOneSync(`SELECT '${lit}' AS v`).v, lit, `sql len ${n}`);
+    }
+  });
+
+  it("should finalize a statement only after its queued async calls land", async () => {
+    const stmt = db.prepare("SELECT id FROM rr WHERE id = $1");
+    const pending = [];
+    for (let i = 0; i < 8; i++) pending.push(stmt.query([1]));
+    stmt.finalize();
+    assert.throws(() => stmt.querySync([1]), /finalized/);
+    for (let i = 0; i < 50; i++) db.prepare("SELECT 1").finalize();
+    const results = await Promise.all(pending);
+    for (const r of results) assert.deepEqual(r, [{ id: 1 }]);
+  });
+
+  it("should close a database only after queued statement and transaction work lands", async () => {
+    const other = await Database.open(":memory:");
+    await other.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+    const stmt = other.prepare("INSERT INTO t VALUES ($1)");
+    const tx = await other.begin();
+    const work = [stmt.execute([1]), stmt.execute([2]), tx.execute("INSERT INTO t VALUES (3)")];
+    await other.close();
+    const settled = await Promise.allSettled(work);
+    assert.ok(settled.every((s) => s.status === "fulfilled"));
+    assert.throws(() => tx.executeSync("SELECT 1"), /closed/);
+  });
+
+  it("should notice a schema change after prepare", async () => {
+    db.execSync("CREATE TABLE sc (id INTEGER PRIMARY KEY, name TEXT)");
+    db.executeSync("INSERT INTO sc VALUES (1, 'a')");
+    const stmt = db.prepare("SELECT * FROM sc");
+    assert.deepEqual(stmt.queryOneSync(), { id: 1, name: "a" });
+    assert.deepEqual(stmt.querySync(), [{ id: 1, name: "a" }]);
+    assert.deepEqual(await stmt.query(), [{ id: 1, name: "a" }]);
+    db.execSync("ALTER TABLE sc ADD COLUMN extra_column_name TEXT");
+    assert.deepEqual(stmt.queryOneSync(), { id: 1, name: "a", extra_column_name: null });
+    assert.deepEqual(stmt.querySync(), [{ id: 1, name: "a", extra_column_name: null }]);
+    assert.deepEqual(await stmt.query(), [{ id: 1, name: "a", extra_column_name: null }]);
+    stmt.finalize();
+  });
+
+  it("should accept SQL larger than the stack buffer", () => {
+    db.execSync("CREATE TABLE bulk (id INTEGER PRIMARY KEY, v TEXT)");
+    const values = [];
+    for (let i = 0; i < 20000; i++) values.push(`(${i}, 'value number ${i} with some padding text')`);
+    const sql = `INSERT INTO bulk VALUES ${values.join(", ")}`;
+    assert.ok(sql.length > 1000000);
+    assert.equal(db.executeSync(sql).changes, 20000);
+    assert.equal(db.queryOneSync("SELECT COUNT(*) AS n FROM bulk").n, 20000);
+  });
+
+  it("should report the engine message when a commit fails", async () => {
+    db.execSync("CREATE TABLE pk (id INTEGER PRIMARY KEY)");
+    const a = db.beginSync();
+    const b = db.beginSync();
+    a.executeSync("INSERT INTO pk VALUES (1)");
+    b.executeSync("INSERT INTO pk VALUES (1)");
+    a.commitSync();
+    assert.throws(() => b.commitSync(), (err) => err.message.length > 0 && !/^Failed to commit/.test(err.message));
+
+    const c = await db.begin();
+    const d = await db.begin();
+    await c.execute("INSERT INTO pk VALUES (2)");
+    await d.execute("INSERT INTO pk VALUES (2)");
+    await c.commit();
+    await assert.rejects(d.commit(), (err) => err.message.length > 0 && !/^Failed to commit/.test(err.message));
+  });
+
+  it("should roll back an open transaction when the database closes", async () => {
+    const other = await Database.open(":memory:");
+    await other.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+    const tx = other.beginSync();
+    tx.executeSync("INSERT INTO t VALUES (1)");
+    const peer = other.clone();
+    await other.close();
+    assert.throws(() => tx.rollbackSync(), /closed/);
+    assert.equal(peer.queryOneSync("SELECT COUNT(*) AS n FROM t").n, 0);
+    peer.closeSync();
+  });
+
+  it("should encode dates, vectors and bytes in batches like single executes", () => {
+    db.execSync("CREATE TABLE bt (id INTEGER PRIMARY KEY, at TIMESTAMP, vec VECTOR(2), raw TEXT)");
+    const when = new Date("2026-10-21T10:20:30.000Z");
+    db.executeBatchSync("INSERT INTO bt VALUES ($1, $2, $3, $4)", [
+      [1, when, new Float32Array([1.5, 2.5]), Buffer.from("bytes")],
+    ]);
+    db.executeSync("INSERT INTO bt VALUES ($1, $2, $3, $4)", [2, when, new Float32Array([1.5, 2.5]), Buffer.from("bytes")]);
+    const rows = db.querySync("SELECT * FROM bt ORDER BY id");
+    assert.equal(rows[0].at.getTime(), rows[1].at.getTime());
+    assert.deepEqual(Array.from(rows[0].vec), Array.from(rows[1].vec));
+    assert.equal(rows[0].raw, "bytes");
+    assert.equal(rows[0].raw, rows[1].raw);
+  });
+
+  it("should keep long column names on every result path", async () => {
+    const name = "c".repeat(140);
+    const sql = `SELECT 1 AS ${name}`;
+    assert.deepEqual(Object.keys(db.queryOneSync(sql)), [name]);
+    assert.deepEqual(Object.keys(db.querySync(sql)[0]), [name]);
+    assert.deepEqual(Object.keys((await db.query(sql))[0]), [name]);
+    assert.deepEqual(db.queryRawSync(sql).columns, [name]);
+  });
+
+  it("should reject a bigint outside int64 and bind an invalid date as NULL", () => {
+    assert.throws(() => db.querySync("SELECT $1 AS v", [(1n << 64n) + 5n]));
+    assert.deepEqual(db.queryOneSync("SELECT $1 AS v", [new Date(NaN)]), { v: null });
+    assert.deepEqual(db.queryOneSync("SELECT $1 AS v", [123n]), { v: 123 });
+  });
+});
+
 describe("Type declarations", () => {
   it("should expose sync runtime helpers in index.d.ts", () => {
     const dts = fs.readFileSync(path.join(process.cwd(), "index.d.ts"), "utf8");

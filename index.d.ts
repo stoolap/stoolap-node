@@ -88,7 +88,10 @@ export declare class Database {
    * Auto-wraps in a transaction: begin, execute all, commit.
    * Returns { changes: total_rows_affected }.
    */
-  executeBatchSync(sql: string, paramsArray: any[][]): RunResult;
+  executeBatchSync(
+    sql: string,
+    paramsArray: any[][] | Record<string, any>[],
+  ): RunResult;
   /** Create a prepared statement (synchronous). */
   prepare(sql: string): PreparedStatement;
   /** Begin a transaction. Returns Promise<Transaction>. */
@@ -97,10 +100,32 @@ export declare class Database {
   beginSync(): Transaction;
   /** Close the database. Returns Promise<void>. */
   close(): Promise<void>;
+  /**
+   * Open a cursor over the query's rows. Iterate it with `for...of` or
+   * `for await...of`; rows are fetched in chunks as the loop advances and
+   * the cursor closes itself when the loop ends, breaks or throws.
+   */
+  iterate(sql: string, params?: any[] | Record<string, any>): RowCursor;
   /** Close the database synchronously. */
   closeSync(): void;
 }
 export type JsDatabase = Database;
+
+/**
+ * A cursor over an open result set, from `iterate()`. Iterable both
+ * synchronously and with `for await`. Rows cross the native boundary in
+ * chunks of 32 to 256 rows.
+ */
+export declare class RowCursor
+  implements Iterable<Record<string, any>>, AsyncIterable<Record<string, any>>
+{
+  [Symbol.iterator](): Iterator<Record<string, any>>;
+  [Symbol.asyncIterator](): AsyncIterator<Record<string, any>>;
+  /** End the iteration early and release the result set. */
+  close(): void;
+  /** True once the cursor was closed or its result set was exhausted. */
+  get closed(): boolean;
+}
 
 export declare class PreparedStatement {
   /** Execute the statement (DML). Returns Promise<{ changes: number }>. */
@@ -132,7 +157,9 @@ export declare class PreparedStatement {
    * Execute the prepared SQL with multiple param sets in a single call.
    * Returns { changes: total_rows_affected }.
    */
-  executeBatchSync(paramsArray: any[][]): RunResult;
+  executeBatchSync(paramsArray: any[][] | Record<string, any>[]): RunResult;
+  /** Open a cursor over the statement's rows; see `Database.iterate`. */
+  iterate(params?: any[] | Record<string, any>): RowCursor;
   /** Get the SQL text of this prepared statement. */
   get sql(): string;
   /** Release the prepared statement. */
@@ -188,7 +215,15 @@ export declare class Transaction {
    * Execute the same SQL with multiple param sets in a single call.
    * Returns { changes: total_rows_affected }.
    */
-  executeBatchSync(sql: string, paramsArray: any[][]): RunResult;
+  executeBatchSync(
+    sql: string,
+    paramsArray: any[][] | Record<string, any>[],
+  ): RunResult;
+  /**
+   * Open a cursor over the query's rows inside the transaction; see
+   * `Database.iterate`. Commit and rollback close open cursors.
+   */
+  iterate(sql: string, params?: any[] | Record<string, any>): RowCursor;
   /** Rollback the transaction synchronously. */
   rollbackSync(): void;
 }

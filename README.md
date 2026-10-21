@@ -97,7 +97,8 @@ const db = await Database.open('file:///absolute/path/to/db');
 | `exec(sql)` | `Promise<void>` | Execute a DDL statement |
 | `query(sql, params?)` | `Promise<Object[]>` | Query rows as objects |
 | `queryOne(sql, params?)` | `Promise<Object \| null>` | Query single row |
-| `queryRaw(sql, params?)` | `Promise<{columns, rows}>` | Query in columnar format |
+| `queryRaw(sql, params?)` | `Promise<{columns, rows}>` | Query as arrays of values |
+| `iterate(sql, params?)` | `RowCursor` | Cursor over rows, `for await` or `for...of` |
 | `begin()` | `Promise<Transaction>` | Begin a transaction |
 | `close()` | `Promise<void>` | Close the database |
 
@@ -113,7 +114,8 @@ Sync methods run on the main thread. Faster for simple operations but block the 
 | `execSync(sql)` | `void` | Execute a DDL statement |
 | `querySync(sql, params?)` | `Object[]` | Query rows as objects |
 | `queryOneSync(sql, params?)` | `Object \| null` | Query single row |
-| `queryRawSync(sql, params?)` | `{columns, rows}` | Query in columnar format |
+| `queryRawSync(sql, params?)` | `{columns, rows}` | Query as arrays of values |
+| `iterate(sql, params?)` | `RowCursor` | Cursor over rows, fetched in chunks |
 | `executeBatchSync(sql, paramsArray)` | `RunResult` | Execute with multiple param sets |
 | `beginSync()` | `Transaction` | Begin a transaction |
 | `prepare(sql)` | `PreparedStatement` | Create a prepared statement |
@@ -209,13 +211,32 @@ await db.close();
 
 #### Raw Query Format
 
-`queryRaw` / `queryRawSync` return `{ columns: string[], rows: any[][] }` instead of an array of objects. Faster when you don't need named keys.
+`queryRaw` / `queryRawSync` return `{ columns: string[], rows: any[][] }`, one array per row, instead of an array of objects. Faster when you don't need named keys.
 
 ```js
 const raw = db.queryRawSync('SELECT id, name, email FROM users ORDER BY id');
 console.log(raw.columns); // ['id', 'name', 'email']
 console.log(raw.rows);    // [[1, 'Alice', 'alice@example.com'], [2, 'Bob', 'bob@example.com']]
 ```
+
+#### Iterating Rows
+
+`iterate` opens a cursor and fetches rows in chunks (32 rows, doubling to 256) as the loop advances, so a large result never has to be materialized at once. The same cursor works with `for...of` and `for await...of`, and it closes itself when the loop ends, breaks or throws. `Database`, `Transaction` and `PreparedStatement` all have it.
+
+```js
+for (const user of db.iterate('SELECT * FROM users WHERE active = $1', [true])) {
+  if (user.balance < 0) break; // the cursor is closed on break
+}
+
+for await (const row of db.iterate('SELECT * FROM events WHERE day = :day', { day: '2026-10-21' })) {
+  await ship(row);
+}
+
+const stmt = db.prepare('SELECT * FROM users WHERE age > :min');
+for (const user of stmt.iterate({ min: 30 })) { /* ... */ }
+```
+
+A cursor opened on a transaction is closed by `commit` and `rollback`; one opened on a database is closed with it. Call `cursor.close()` to end an iteration early without breaking out of a loop.
 
 #### Batch Execution
 
@@ -256,7 +277,8 @@ All methods mirror `Database` but without the `sql` parameter (it's bound at pre
 | `execute(params?)` | `executeSync(params?)` | Execute DML statement |
 | `query(params?)` | `querySync(params?)` | Query rows as objects |
 | `queryOne(params?)` | `queryOneSync(params?)` | Query single row |
-| `queryRaw(params?)` | `queryRawSync(params?)` | Query in columnar format |
+| `queryRaw(params?)` | `queryRawSync(params?)` | Query as arrays of values |
+| `iterate(params?)` | — | Cursor over rows, `for await` or `for...of` |
 | | `executeBatchSync(paramsArray)` | Execute with multiple param sets |
 | | `finalize()` | Release the prepared statement |
 
@@ -305,7 +327,8 @@ console.log(result.changes); // 3
 | `execute(sql, params?)` | `executeSync(sql, params?)` | Execute DML statement |
 | `query(sql, params?)` | `querySync(sql, params?)` | Query rows as objects |
 | `queryOne(sql, params?)` | `queryOneSync(sql, params?)` | Query single row |
-| `queryRaw(sql, params?)` | `queryRawSync(sql, params?)` | Query in columnar format |
+| `queryRaw(sql, params?)` | `queryRawSync(sql, params?)` | Query as arrays of values |
+| `iterate(sql, params?)` | — | Cursor over rows, closed by commit/rollback |
 | `commit()` | `commitSync()` | Commit the transaction |
 | `rollback()` | `rollbackSync()` | Rollback the transaction |
 | | `executeBatchSync(sql, paramsArray)` | Execute with multiple param sets |
@@ -378,6 +401,8 @@ db.querySync(
   { id: 1, name: 'Alice' }
 );
 ```
+
+Synchronous ad hoc statements pass named parameters to the engine as they are: the SQL is not rewritten, a `:name` inside a string literal is left alone, a name used twice is bound once, keys the SQL does not mention are ignored and a name the object lacks binds `NULL`. A prepared statement, and the asynchronous ad hoc methods, resolve `:name` placeholders in the driver and bind by position, which is the engine's fastest path.
 
 ### Error Handling
 

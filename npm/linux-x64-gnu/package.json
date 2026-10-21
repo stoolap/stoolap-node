@@ -1,6 +1,6 @@
 {
   "name": "@stoolap/lib-linux-x64-gnu",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "main": "libstoolap.so",
   "files": [
     "libstoolap.so"

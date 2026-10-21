@@ -1344,6 +1344,41 @@ async function main() {
     printRow("Large result (no LIMIT)", sUs, lUs);
   }
 
+  // --- Iterate (full scan, row by row) ---
+  {
+    const sSt = sdb.prepare(
+      "SELECT id, name, balance FROM users WHERE active = true",
+    );
+    const lSt = ldb.prepare(
+      "SELECT id, name, balance FROM users WHERE active = 1",
+    );
+    const iters = 20;
+    const scanS = () => {
+      let n = 0;
+      for (const r of sSt.iterate()) n += r.id;
+      return n;
+    };
+    const scanL = () => {
+      let n = 0;
+      for (const r of lSt.iterate()) n += r.id;
+      return n;
+    };
+    for (let i = 0; i < 5; i++) {
+      scanS();
+      scanL();
+    }
+
+    let t = performance.now();
+    for (let i = 0; i < iters; i++) scanS();
+    const sUs = ((performance.now() - t) * 1000) / iters;
+
+    t = performance.now();
+    for (let i = 0; i < iters; i++) scanL();
+    const lUs = ((performance.now() - t) * 1000) / iters;
+
+    printRow("Iterate (row cursor)", sUs, lUs);
+  }
+
   // --- Multiple CTEs (2) ---
   {
     const sSt = sdb.prepare(
