@@ -9,7 +9,9 @@ permissions:
   id-token: write
 
 env:
-  STOOLAP_ENGINE_REF: v0.5.0
+  # Prereleases (a version with a '-') build against engine main and publish
+  # under the npm tag 'next'; set this back to the engine tag for 0.5.0.
+  STOOLAP_ENGINE_REF: main
 
 jobs:
   build:
@@ -145,6 +147,13 @@ jobs:
             ls -la "$pkg"
           done
 
+      - name: Pick the npm dist-tag
+        run: |
+          ver=$(node -p "require('./package.json').version")
+          case "$ver" in *-*) tag=next ;; *) tag=latest ;; esac
+          echo "NPM_TAG=$tag" >> "$GITHUB_ENV"
+          echo "$ver -> $tag"
+
       - name: Publish platform packages
         run: |
           for pkg in npm/*/; do
@@ -156,7 +165,7 @@ jobs:
                 continue
               fi
               echo "Publishing $pkg..."
-              npm publish "$pkg" --access public --provenance
+              npm publish "$pkg" --access public --provenance --tag "$NPM_TAG"
             fi
           done
 
@@ -167,10 +176,11 @@ jobs:
           if npm view "$name@$ver" version >/dev/null 2>&1; then
             echo "Skipping $name@$ver (already published)"
           else
-            npm publish --access public --provenance
+            npm publish --access public --provenance --tag "$NPM_TAG"
           fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
