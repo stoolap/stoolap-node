@@ -402,7 +402,7 @@ db.querySync(
 );
 ```
 
-Synchronous ad hoc statements pass named parameters to the engine as they are: the SQL is not rewritten, a `:name` inside a string literal is left alone, a name used twice is bound once, keys the SQL does not mention are ignored and a name the object lacks binds `NULL`. A prepared statement, and the asynchronous ad hoc methods, resolve `:name` placeholders in the driver and bind by position, which is the engine's fastest path.
+Synchronous ad hoc statements pass named parameters to the engine as they are: the SQL is not rewritten, a `:name` inside a string literal is left alone, a name used twice is bound once, keys the SQL does not mention are ignored and a name the object lacks is an error. A prepared statement, and the asynchronous ad hoc methods, resolve `:name` placeholders in the driver and bind by position, which is the engine's fastest path.
 
 ### Error Handling
 

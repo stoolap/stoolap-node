@@ -2089,12 +2089,23 @@ describe("Native named parameters", () => {
     stmt.finalize();
   });
 
-  it("should ignore extra keys and bind a missing name as NULL", () => {
-    const row = db.queryOneSync("SELECT :x AS x, :missing AS m", {
-      x: 7,
-      extra: "unused",
-    });
-    assert.deepEqual(row, { x: 7, m: null });
+  it("should ignore extra keys and refuse a missing name", () => {
+    const row = db.queryOneSync("SELECT :x AS x", { x: 7, extra: "unused" });
+    assert.deepEqual(row, { x: 7 });
+    assert.throws(
+      () => db.queryOneSync("SELECT :x AS x, :missing AS m", { x: 7 }),
+      /named parameter :missing has no value/,
+    );
+  });
+
+  it("should refuse a missing name on a prepared statement like the engine does", () => {
+    const stmt = db.prepare("SELECT :x AS x, :missing AS m");
+    assert.throws(
+      () => stmt.queryOneSync({ x: 7 }),
+      /named parameter :missing has no value/,
+    );
+    assert.deepEqual(stmt.queryOneSync({ x: 7, missing: null }), { x: 7, m: null });
+    stmt.finalize();
   });
 
   it("should keep a :name inside a string literal of a prepared statement", () => {
