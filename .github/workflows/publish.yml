@@ -66,6 +66,18 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
+      - name: Strip debug info from the shared library
+        shell: bash
+        run: |
+          lib=stoolap-engine/target/${{ matrix.settings.target }}/release/${{ matrix.settings.lib }}
+          case "${{ matrix.settings.target }}" in
+            *apple-darwin) strip -x "$lib" ;;
+            aarch64-unknown-linux-gnu) aarch64-linux-gnu-strip "$lib" ;;
+            *linux-gnu) strip "$lib" ;;
+            *) ;; # MSVC puts debug info in a separate .pdb
+          esac
+          ls -l "$lib"
+
       - name: Upload shared library
         uses: actions/upload-artifact@v4
         with:
