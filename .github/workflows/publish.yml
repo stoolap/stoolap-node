@@ -9,9 +9,9 @@ permissions:
   id-token: write
 
 env:
-  # Prereleases (a version with a '-') build against engine main and publish
-  # under the npm tag 'next'; set this back to the engine tag for 0.5.0.
-  STOOLAP_ENGINE_REF: main
+  # Engine tag the shared libraries are built from. A prerelease version (with a
+  # '-') publishes under the npm tag 'next', a release under 'latest'.
+  STOOLAP_ENGINE_REF: v0.5.0
 
 jobs:
   build:

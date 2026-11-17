@@ -12,8 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Tracks engine main until 0.5.0 ships; publish.yml stays on the tagged engine.
-  STOOLAP_ENGINE_REF: main
+  # Engine tag the driver is built and tested against; publish.yml uses the same ref.
+  STOOLAP_ENGINE_REF: v0.5.0
 
 jobs:
   build:
