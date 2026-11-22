@@ -13,7 +13,7 @@ concurrency:
 
 env:
   # Engine tag the driver is built and tested against; publish.yml uses the same ref.
-  STOOLAP_ENGINE_REF: v0.5.0
+  STOOLAP_ENGINE_REF: v0.5.1
 
 jobs:
   build:
