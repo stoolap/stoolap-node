@@ -106,21 +106,31 @@ export declare class Database {
    * the cursor closes itself when the loop ends, breaks or throws.
    */
   iterate(sql: string, params?: any[] | Record<string, any>): RowCursor;
+  /**
+   * Like `iterate`, but each row is an array of values and `cursor.columns`
+   * names the columns, so duplicate names are kept apart.
+   */
+  iterateRaw(sql: string, params?: any[] | Record<string, any>): RowCursor<any[]>;
   /** Close the database synchronously. */
   closeSync(): void;
 }
 export type JsDatabase = Database;
 
 /**
- * A cursor over an open result set, from `iterate()`. Iterable both
- * synchronously and with `for await`. Rows cross the native boundary in
- * chunks of 32 to 256 rows.
+ * A cursor over an open result set, from `iterate()` (rows as objects) or
+ * `iterateRaw()` (rows as arrays). Iterable both synchronously and with
+ * `for await`. Rows cross the native boundary in chunks of 32 to 256 rows.
  */
-export declare class RowCursor
-  implements Iterable<Record<string, any>>, AsyncIterable<Record<string, any>>
+export declare class RowCursor<T = Record<string, any>>
+  implements Iterable<T>, AsyncIterable<T>
 {
-  [Symbol.iterator](): Iterator<Record<string, any>>;
-  [Symbol.asyncIterator](): AsyncIterator<Record<string, any>>;
+  [Symbol.iterator](): Iterator<T>;
+  [Symbol.asyncIterator](): AsyncIterator<T>;
+  /**
+   * The column names, in result order. Known once the first chunk has
+   * landed; read before the loop, it fetches that chunk synchronously.
+   */
+  get columns(): string[];
   /** End the iteration early and release the result set. */
   close(): void;
   /** True once the cursor was closed or its result set was exhausted. */
@@ -160,6 +170,8 @@ export declare class PreparedStatement {
   executeBatchSync(paramsArray: any[][] | Record<string, any>[]): RunResult;
   /** Open a cursor over the statement's rows; see `Database.iterate`. */
   iterate(params?: any[] | Record<string, any>): RowCursor;
+  /** Rows as arrays with `cursor.columns`; see `Database.iterateRaw`. */
+  iterateRaw(params?: any[] | Record<string, any>): RowCursor<any[]>;
   /** Get the SQL text of this prepared statement. */
   get sql(): string;
   /** Release the prepared statement. */
@@ -224,6 +236,8 @@ export declare class Transaction {
    * `Database.iterate`. Commit and rollback close open cursors.
    */
   iterate(sql: string, params?: any[] | Record<string, any>): RowCursor;
+  /** Rows as arrays with `cursor.columns`; see `Database.iterateRaw`. */
+  iterateRaw(sql: string, params?: any[] | Record<string, any>): RowCursor<any[]>;
   /** Rollback the transaction synchronously. */
   rollbackSync(): void;
 }

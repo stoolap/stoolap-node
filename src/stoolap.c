@@ -593,8 +593,45 @@ typedef struct {
   napi_ref factory;
 } CachedStmt;
 
-/* makeRowFactory from lib/parse.js, handed over at load time */
-static napi_ref row_factory_maker = NULL;
+/* Row factories for ad hoc statements, keyed by the packed header bytes.
+ * A handful of hot queries keep their factory; the rest round-robin. */
+#define FACTORY_CACHE_SIZE 8
+typedef struct {
+  uint8_t* header;
+  uint32_t len;
+  napi_ref factory;
+} FactoryEntry;
+
+/* Per-environment state (napi instance data). N-API references belong to
+ * the env that created them and worker threads each load the addon into
+ * their own env, so nothing here may be process-global. */
+typedef struct {
+  /* makeRowFactory from lib/parse.js, handed over at load time */
+  napi_ref row_factory_maker;
+  FactoryEntry factory_cache[FACTORY_CACHE_SIZE];
+  int factory_cache_next;
+  /* SQL longer than the stack buffer goes here; reused across calls */
+  char* sql_scratch;
+  size_t sql_scratch_cap;
+} EnvState;
+
+static EnvState* env_state(napi_env env) {
+  void* data = NULL;
+  napi_get_instance_data(env, &data);
+  return (EnvState*)data;
+}
+
+static void finalize_env_state(napi_env env, void* data, void* hint) {
+  (void)hint;
+  EnvState* es = (EnvState*)data;
+  if (es->row_factory_maker) napi_delete_reference(env, es->row_factory_maker);
+  for (int i = 0; i < FACTORY_CACHE_SIZE; i++) {
+    if (es->factory_cache[i].factory) napi_delete_reference(env, es->factory_cache[i].factory);
+    free(es->factory_cache[i].header);
+  }
+  free(es->sql_scratch);
+  free(es);
+}
 
 static void finalize_cached_stmt(napi_env env, void* data, void* hint) {
   (void)env; (void)hint;
@@ -615,20 +652,18 @@ static void finalize_cached_stmt(napi_env env, void* data, void* hint) {
 
 #define SQL_STACK_SIZE 512
 
-/* SQL longer than the stack buffer goes to a scratch buffer that is reused
- * across calls. Only the synchronous wrappers use it, so it needs no lock. */
-static char* sql_scratch = NULL;
-static size_t sql_scratch_cap = 0;
-
-static char* sql_scratch_get(size_t len) {
-  if (len + 1 > sql_scratch_cap) {
+/* SQL longer than the stack buffer goes to the env's scratch buffer, reused
+ * across calls. Only the synchronous wrappers use it, on the env's thread. */
+static char* sql_scratch_get(napi_env env, size_t len) {
+  EnvState* es = env_state(env);
+  if (len + 1 > es->sql_scratch_cap) {
     size_t cap = len + 1 + len / 2;
-    char* grown = realloc(sql_scratch, cap);
+    char* grown = realloc(es->sql_scratch, cap);
     if (!grown) return NULL;
-    sql_scratch = grown;
-    sql_scratch_cap = cap;
+    es->sql_scratch = grown;
+    es->sql_scratch_cap = cap;
   }
-  return sql_scratch;
+  return es->sql_scratch;
 }
 
 #define GET_SQL_STRING(env, jsval, sql_var) \
@@ -643,7 +678,7 @@ static char* sql_scratch_get(size_t len) {
     sql_var = _stack_sql; \
   } else { \
     napi_get_value_string_utf8(env, jsval, NULL, 0, &_sql_len); \
-    sql_var = sql_scratch_get(_sql_len); \
+    sql_var = sql_scratch_get(env, _sql_len); \
     if (!sql_var) THROW(env, "Out of memory"); \
     napi_get_value_string_utf8(env, jsval, sql_var, _sql_len + 1, &_sql_len); \
   }
@@ -842,9 +877,10 @@ static napi_value packed_row(napi_env env, const uint8_t* buf, uint32_t* off,
 /* Ask lib/parse.js for a row factory for these column names; NULL when it
  * declines (no columns, or more than it compiles for). */
 static napi_value build_row_factory(napi_env env, char names[][128], int32_t col_count) {
-  if (!row_factory_maker) return NULL;
+  EnvState* es = env_state(env);
+  if (!es->row_factory_maker) return NULL;
   napi_value maker, names_arr, factory;
-  napi_get_reference_value(env, row_factory_maker, &maker);
+  napi_get_reference_value(env, es->row_factory_maker, &maker);
   napi_create_array_with_length(env, (size_t)col_count, &names_arr);
   for (int32_t i = 0; i < col_count; i++) {
     napi_value name;
@@ -859,21 +895,12 @@ static napi_value build_row_factory(napi_env env, char names[][128], int32_t col
   return factory;
 }
 
-/* Row factories for ad hoc statements, keyed by the packed header bytes.
- * A handful of hot queries keep their factory; the rest round-robin. */
-#define FACTORY_CACHE_SIZE 8
-typedef struct {
-  uint8_t* header;
-  uint32_t len;
-  napi_ref factory;
-} FactoryEntry;
-static FactoryEntry factory_cache[FACTORY_CACHE_SIZE];
-static int factory_cache_next = 0;
-
+/* The env's row factory for an ad hoc statement's column list. */
 static napi_value adhoc_row_factory(napi_env env, const uint8_t* buf, uint32_t header_len,
                                     char names[][128], int32_t col_count) {
+  EnvState* es = env_state(env);
   for (int i = 0; i < FACTORY_CACHE_SIZE; i++) {
-    FactoryEntry* e = &factory_cache[i];
+    FactoryEntry* e = &es->factory_cache[i];
     if (e->factory && e->len == header_len && memcmp(e->header, buf, header_len) == 0) {
       napi_value f;
       napi_get_reference_value(env, e->factory, &f);
@@ -885,8 +912,8 @@ static napi_value adhoc_row_factory(napi_env env, const uint8_t* buf, uint32_t h
   uint8_t* copy = malloc(header_len);
   if (!copy) return f;
   memcpy(copy, buf, header_len);
-  FactoryEntry* e = &factory_cache[factory_cache_next];
-  factory_cache_next = (factory_cache_next + 1) % FACTORY_CACHE_SIZE;
+  FactoryEntry* e = &es->factory_cache[es->factory_cache_next];
+  es->factory_cache_next = (es->factory_cache_next + 1) % FACTORY_CACHE_SIZE;
   if (e->factory) napi_delete_reference(env, e->factory);
   free(e->header);
   e->header = copy;
@@ -1004,8 +1031,10 @@ static napi_value read_buf_val(napi_env env, const uint8_t* buf, uint32_t* poff)
       memcpy(&v, buf + *poff, 8); *poff += 8;
       if (v >= -2147483648LL && v <= 2147483647LL)
         napi_create_int32(env, (int32_t)v, &val);
-      else
+      else if (v >= -9007199254740991LL && v <= 9007199254740991LL)
         napi_create_int64(env, v, &val);
+      else
+        napi_create_bigint_int64(env, v, &val); /* exact past 2^53 */
       break;
     }
     case T_FLOAT: {
@@ -1028,7 +1057,9 @@ static napi_value read_buf_val(napi_env env, const uint8_t* buf, uint32_t* poff)
     case T_TIMESTAMP: {
       int64_t nanos;
       memcpy(&nanos, buf + *poff, 8); *poff += 8;
-      napi_create_date(env, (double)nanos / 1000000.0, &val);
+      int64_t ms = nanos / 1000000; /* floor, not a float division */
+      if (nanos % 1000000 < 0) ms--;
+      napi_create_date(env, (double)ms, &val);
       break;
     }
     case T_BLOB: {
@@ -1534,8 +1565,9 @@ static napi_value fn_set_row_factory_maker(napi_env env, napi_callback_info info
   size_t argc = 1;
   napi_value argv[1];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-  if (row_factory_maker) napi_delete_reference(env, row_factory_maker);
-  napi_create_reference(env, argv[0], 1, &row_factory_maker);
+  EnvState* es = env_state(env);
+  if (es->row_factory_maker) napi_delete_reference(env, es->row_factory_maker);
+  napi_create_reference(env, argv[0], 1, &es->row_factory_maker);
   napi_value undef;
   napi_get_undefined(env, &undef);
   return undef;
@@ -2730,7 +2762,9 @@ static napi_value fn_rows_chunk(napi_env env, napi_callback_info info) {
     const char* msg = S.rows_errmsg(rows);
     THROW(env, msg ? msg : "Row fetch error");
   }
-  if (n == 0) {
+  /* a chunk with no rows still carries the header (the column list of an
+   * empty result); null only when the cursor is closed */
+  if (len == 0) {
     napi_value null_val;
     napi_get_null(env, &null_val);
     return null_val;
@@ -2769,7 +2803,7 @@ static void execute_rows_chunk_async(napi_env env, void* data) {
     task->base.error = dup_cstr(S.rows_errmsg(rows), "Row fetch error");
     return;
   }
-  if (n == 0) return;
+  if (len == 0) return;
   task->buf = malloc((size_t)len);
   if (!task->buf) { task->base.error = dup_cstr(NULL, "Out of memory"); return; }
   memcpy(task->buf, buf, (size_t)len);
@@ -2854,6 +2888,11 @@ static napi_value fn_rows_cursor_close(napi_env env, napi_callback_info info) {
 } while(0)
 
 static napi_value Init(napi_env env, napi_value exports) {
+  EnvState* es = calloc(1, sizeof(EnvState));
+  if (!es || napi_set_instance_data(env, es, finalize_env_state, NULL) != napi_ok) {
+    free(es);
+    THROW(env, "Could not allocate addon state");
+  }
   EXPORT_FN(env, exports, "loadLibrary",   fn_load_library);
   EXPORT_FN(env, exports, "setRowFactoryMaker", fn_set_row_factory_maker);
   EXPORT_FN(env, exports, "dbOpen",        fn_db_open);

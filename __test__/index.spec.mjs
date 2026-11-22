@@ -18,6 +18,8 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 
 const require = createRequire(import.meta.url);
 const { Database } = require("../index.js");
@@ -2411,5 +2413,140 @@ describe("Type declarations", () => {
     assert.match(dts, /static openSync\s*\(/);
     assert.match(dts, /closeSync\s*\(\): void/);
     assert.match(dts, /finalize\s*\(\): void/);
+  });
+});
+
+// ============================================================
+// 0.5.1: issues #7, #8, #9, #10, #11
+// ============================================================
+describe("0.5.1 fixes", () => {
+  let db;
+  const bigWant = [9007199254740993n, 9007199254740991, -9007199254740993n, 9223372036854775807n];
+
+  before(async () => {
+    db = await Database.open(":memory:");
+    await db.exec("CREATE TABLE big (id INTEGER PRIMARY KEY, v INTEGER)");
+    await db.execute(
+      "INSERT INTO big VALUES (1, 9007199254740993), (2, 9007199254740991), (3, -9007199254740993), (4, $1)",
+      [9223372036854775807n],
+    );
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it("should floor a TIMESTAMP to the millisecond on every path (#7)", async () => {
+    await db.exec("CREATE TABLE ts (id INTEGER PRIMARY KEY, d TIMESTAMP)");
+    await db.execute(
+      "INSERT INTO ts VALUES (1, '2026-01-01 10:00:02.730'), (2, '2026-01-01 10:00:02.730123'), (3, '1969-12-31 23:59:59.999500')",
+    );
+    const want = ["2026-01-01T10:00:02.730Z", "2026-01-01T10:00:02.730Z", "1969-12-31T23:59:59.999Z"];
+    const iso = (rows) => rows.map((r) => r.d.toISOString());
+    assert.deepEqual(iso(await db.query("SELECT d FROM ts ORDER BY id")), want); // JS parser
+    assert.deepEqual(iso(db.querySync("SELECT d FROM ts ORDER BY id")), want); // C row path
+    assert.deepEqual(iso([...db.iterate("SELECT d FROM ts ORDER BY id")]), want);
+    const stmt = db.prepare("SELECT d FROM ts WHERE id = $1");
+    assert.equal(stmt.queryOneSync([1]).d.toISOString(), want[0]);
+    assert.equal((await stmt.queryOne([3])).d.toISOString(), want[2]);
+    stmt.finalize();
+  });
+
+  it("should return an INTEGER past 2^53 as a bigint and a safe one as a number (#8)", async () => {
+    const vals = (rows) => rows.map((r) => r.v);
+    assert.deepEqual(vals(await db.query("SELECT v FROM big ORDER BY id")), bigWant);
+    assert.deepEqual(vals(db.querySync("SELECT v FROM big ORDER BY id")), bigWant);
+    assert.deepEqual(vals([...db.iterate("SELECT v FROM big ORDER BY id")]), bigWant);
+    assert.deepEqual(db.queryRawSync("SELECT v FROM big WHERE id = 1").rows, [[9007199254740993n]]);
+    assert.deepEqual(db.queryOneSync("SELECT v FROM big WHERE v = $1", [9007199254740993n]), {
+      v: 9007199254740993n,
+    });
+    assert.deepEqual(await db.queryOne("SELECT CAST(v AS TEXT) AS s FROM big WHERE id = 4"), {
+      s: "9223372036854775807",
+    });
+  });
+
+  it("should stream rows as arrays with the column list (#9)", async () => {
+    const dup = db.iterateRaw("SELECT 1 AS a, 2 AS a");
+    assert.deepEqual(dup.columns, ["a", "a"]); // before the first row
+    assert.deepEqual([...dup], [[1, 2]]);
+    assert.ok(dup.closed);
+
+    const rows = [];
+    const cur = db.iterateRaw("SELECT v, id FROM big ORDER BY id");
+    for await (const row of cur) rows.push(row);
+    assert.deepEqual(cur.columns, ["v", "id"]);
+    assert.deepEqual(rows, bigWant.map((v, i) => [v, i + 1]));
+
+    const empty = db.iterateRaw("SELECT id, v FROM big WHERE id > 100");
+    assert.deepEqual(empty.columns, ["id", "v"]);
+    assert.deepEqual([...empty], []);
+    assert.deepEqual([...db.iterate("SELECT id FROM big WHERE id > 100")], []);
+    const none = [];
+    for await (const row of db.iterate("SELECT id FROM big WHERE id > 100")) none.push(row);
+    assert.deepEqual(none, []);
+
+    const stmt = db.prepare("SELECT id AS x, id AS x FROM big WHERE id <= :n ORDER BY id");
+    assert.deepEqual([...stmt.iterateRaw({ n: 2 })], [[1, 1], [2, 2]]);
+    stmt.finalize();
+
+    const tx = db.beginSync();
+    const inTx = tx.iterateRaw("SELECT id FROM big ORDER BY id LIMIT 1");
+    assert.deepEqual(inTx.columns, ["id"]);
+    assert.deepEqual([...inTx], [[1]]);
+    tx.commitSync();
+  });
+
+  it("should run sync row queries from several worker threads (#10)", async () => {
+    const indexPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.js");
+    const script = `
+      const { workerData } = require("node:worker_threads");
+      const { Database } = require(${JSON.stringify(indexPath)});
+      const db = Database.openSync(":memory:");
+      db.execSync("CREATE TABLE t (id INTEGER PRIMARY KEY, a FLOAT, c TEXT)");
+      const rows = [];
+      for (let i = 0; i < 300; i++) rows.push([i, i / 3, "row" + i]);
+      db.executeBatchSync("INSERT INTO t VALUES ($1, $2, $3)", rows);
+      for (let i = 0; i < 1500; i++) {
+        // varying column names keep evicting the 8-entry row factory cache
+        const k = (i + workerData * 7) % 24;
+        const few = db.querySync("SELECT id AS id" + k + ", a, c FROM t WHERE id >= $1 ORDER BY id LIMIT 5", [i % 290]);
+        if (few.length !== 5 || few[0]["id" + k] !== i % 290) throw new Error("bad rows");
+        const many = db.querySync("SELECT id AS id" + k + ", a, c FROM t WHERE id >= $1 ORDER BY id LIMIT 200", [i % 100]);
+        if (many.length !== 200) throw new Error("bad chunk");
+      }
+      db.closeSync();
+    `;
+    await Promise.all(
+      Array.from({ length: 4 }, (_, w) =>
+        new Promise((resolve, reject) => {
+          const worker = new Worker(script, { eval: true, workerData: w });
+          worker.on("error", reject);
+          worker.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`worker exit ${code}`))));
+        }),
+      ),
+    );
+  });
+
+  it("should run concurrent async calls on one prepared statement one at a time (#11)", async () => {
+    const read = db.prepare("SELECT v FROM big WHERE id = $1");
+    const ids = Array.from({ length: 64 }, (_, i) => (i % 4) + 1);
+    const rows = await Promise.all(ids.map((id) => read.queryOne([id])));
+    assert.deepEqual(rows.map((r) => r.v), ids.map((id) => bigWant[id - 1]));
+
+    await db.exec("CREATE TABLE burst (id INTEGER PRIMARY KEY)");
+    const write = db.prepare("INSERT INTO burst VALUES ($1)");
+    const results = await Promise.all(Array.from({ length: 50 }, (_, i) => write.execute([i])));
+    assert.ok(results.every((r) => r.changes === 1));
+    assert.deepEqual(await db.queryOne("SELECT COUNT(*) AS n FROM burst"), { n: 50 });
+
+    // a sync call while async work is queued is refused instead of racing the handle
+    const pending = read.query([1]);
+    assert.throws(() => read.querySync([1]), /pending async/);
+    assert.throws(() => read.iterate([1]), /pending async/);
+    await pending;
+    assert.deepEqual(read.querySync([1]), [{ v: 9007199254740993n }]);
+    read.finalize();
+    write.finalize();
   });
 });
