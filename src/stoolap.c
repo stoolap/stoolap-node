@@ -1165,6 +1165,7 @@ typedef struct {
   int heap_buf_count;
   uint8_t* buf;
   int64_t buf_len;
+  StoolapRows* rows; /* left open by the cursor-open variant */
 } AsyncQueryTask;
 
 typedef struct {
@@ -1347,9 +1348,9 @@ static void complete_async_exec(napi_env env, napi_status status, void* data) {
   free(task);
 }
 
-static void execute_async_query(napi_env env, void* data) {
-  (void)env;
-  AsyncQueryTask* task = (AsyncQueryTask*)data;
+/* Start the task's query on the threadpool and return its open rows handle;
+ * NULL with task->base.error set when the query could not start. */
+static StoolapRows* async_query_start(AsyncQueryTask* task) {
   StoolapRows* rows = NULL;
   int32_t rc = STOOLAP_ERR;
 
@@ -1360,7 +1361,7 @@ static void execute_async_query(napi_env env, void* data) {
       : S.query(db, task->sql, &rows);
     if (rc != STOOLAP_OK) {
       task->base.error = dup_cstr(S.errmsg(db), "Query error");
-      return;
+      return NULL;
     }
   } else if (task->kind == ASYNC_QUERY_TX) {
     StoolapTx* tx = (StoolapTx*)task->target;
@@ -1369,18 +1370,26 @@ static void execute_async_query(napi_env env, void* data) {
       : S.tx_query(tx, task->sql, &rows);
     if (rc != STOOLAP_OK) {
       task->base.error = dup_cstr(S.tx_errmsg(tx), "Transaction query error");
-      return;
+      return NULL;
     }
   } else {
     StoolapStmt* stmt = (StoolapStmt*)task->target;
     rc = S.stmt_query(stmt, task->vals, task->val_count, &rows);
     if (rc != STOOLAP_OK) {
       task->base.error = dup_cstr(S.stmt_errmsg(stmt), "Statement query error");
-      return;
+      return NULL;
     }
   }
+  return rows;
+}
 
-  rc = S.rows_fetch_all(rows, &task->buf, &task->buf_len);
+static void execute_async_query(napi_env env, void* data) {
+  (void)env;
+  AsyncQueryTask* task = (AsyncQueryTask*)data;
+  StoolapRows* rows = async_query_start(task);
+  if (!rows) return;
+
+  int32_t rc = S.rows_fetch_all(rows, &task->buf, &task->buf_len);
   if (rc != STOOLAP_OK) {
     /* a runtime error while the rows were produced, e.g. an invalid REGEXP */
     task->base.error = dup_cstr(S.rows_errmsg(rows), "Failed to fetch query results");
@@ -2742,6 +2751,108 @@ static napi_value wrap_rows_open_stmt(napi_env env, napi_callback_info info) {
   return rows_external(env, rows);
 }
 
+/* Open a cursor on the threadpool: the query's work before its first row
+ * (a sort, a group, a join build) no longer blocks the event loop. The
+ * rows handle is left open for rowsChunk / rowsChunkAsync. */
+static void execute_async_rows_open(napi_env env, void* data) {
+  (void)env;
+  AsyncQueryTask* task = (AsyncQueryTask*)data;
+  task->rows = async_query_start(task);
+}
+
+static void complete_async_rows_open(napi_env env, napi_status status, void* data) {
+  AsyncQueryTask* task = (AsyncQueryTask*)data;
+  if (status != napi_ok && !task->base.error) {
+    task->base.error = dup_cstr(NULL, "Async query cancelled");
+  }
+  RowsHandle* h = NULL;
+  if (!task->base.error) {
+    h = malloc(sizeof(RowsHandle));
+    if (!h) task->base.error = dup_cstr(NULL, "Out of memory");
+  }
+  if (task->base.error) {
+    if (task->rows) S.rows_close(task->rows);
+    reject_async_error(env, &task->base, "Query error");
+  } else {
+    h->rows = task->rows;
+    napi_value ext;
+    napi_create_external(env, h, finalize_rows_handle, NULL, &ext);
+    napi_resolve_deferred(env, task->base.deferred, ext);
+  }
+  napi_delete_async_work(env, task->base.work);
+  free(task->sql);
+  free_params(task->vals, task->heap_bufs, task->heap_buf_count);
+  free(task->base.error);
+  free(task);
+}
+
+static int async_task_params(napi_env env, napi_value jsparams, AsyncQueryTask* task) {
+  napi_valuetype vt;
+  napi_typeof(env, jsparams, &vt);
+  if (vt == napi_undefined || vt == napi_null) return 0;
+  return convert_params_copy(env, jsparams, &task->vals, &task->val_count,
+                             &task->heap_bufs, &task->heap_buf_count);
+}
+
+/* rowsOpenAsync(db, tx?, sql, params?): Promise<external> */
+static napi_value fn_rows_open_async(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  AsyncQueryTask* task = calloc(1, sizeof(AsyncQueryTask));
+  if (!task) THROW(env, "Out of memory");
+  StoolapTx* tx = tx_arg(env, argv[1]);
+  if (tx) {
+    task->kind = ASYNC_QUERY_TX;
+    task->target = tx;
+  } else {
+    task->kind = ASYNC_QUERY_DB;
+    napi_get_value_external(env, argv[0], &task->target);
+  }
+  if (copy_napi_string(env, argv[2], &task->sql) != 0) {
+    free(task);
+    THROW(env, "Out of memory");
+  }
+  if (argc > 3 && async_task_params(env, argv[3], task) != 0) {
+    free(task->sql);
+    free(task);
+    THROW(env, "Failed to convert parameters");
+  }
+  napi_value promise = queue_async_work(
+    env, task, &task->base, "rowsOpenAsync", execute_async_rows_open, complete_async_rows_open);
+  if (!promise) {
+    free(task->sql);
+    free_params(task->vals, task->heap_bufs, task->heap_buf_count);
+    free(task);
+    THROW(env, "Failed to queue rowsOpenAsync");
+  }
+  return promise;
+}
+
+/* rowsOpenStmtAsync(external, params?): Promise<external> */
+static napi_value wrap_rows_open_stmt_async(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  GET_STMT(env, argv[0], cs);
+  AsyncQueryTask* task = calloc(1, sizeof(AsyncQueryTask));
+  if (!task) THROW(env, "Out of memory");
+  task->kind = ASYNC_QUERY_STMT;
+  task->target = cs->stmt;
+  if (argc > 1 && async_task_params(env, argv[1], task) != 0) {
+    free(task);
+    THROW(env, "Failed to convert parameters");
+  }
+  napi_value promise = queue_async_work(
+    env, task, &task->base, "rowsOpenStmtAsync", execute_async_rows_open, complete_async_rows_open);
+  if (!promise) {
+    free_params(task->vals, task->heap_bufs, task->heap_buf_count);
+    free(task);
+    THROW(env, "Failed to queue rowsOpenStmtAsync");
+  }
+  return promise;
+}
+
 /* rowsChunk(external, maxRows, buffer?): ArrayBuffer | null
  * Packs up to maxRows rows into `buffer` when it is large enough, else into
  * a new ArrayBuffer sized to grow; the caller keeps the returned buffer for
@@ -2933,6 +3044,8 @@ static napi_value Init(napi_env env, napi_value exports) {
   EXPORT_FN(env, exports, "rowsOpen",      fn_rows_open);
   EXPORT_FN(env, exports, "rowsOpenNamed", fn_rows_open_named);
   EXPORT_FN(env, exports, "rowsOpenStmt",  wrap_rows_open_stmt);
+  EXPORT_FN(env, exports, "rowsOpenAsync", fn_rows_open_async);
+  EXPORT_FN(env, exports, "rowsOpenStmtAsync", wrap_rows_open_stmt_async);
   EXPORT_FN(env, exports, "rowsChunk",     fn_rows_chunk);
   EXPORT_FN(env, exports, "rowsChunkAsync", fn_rows_chunk_async);
   EXPORT_FN(env, exports, "rowsClose",     fn_rows_cursor_close);

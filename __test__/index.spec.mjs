@@ -2550,3 +2550,86 @@ describe("0.5.1 fixes", () => {
     write.finalize();
   });
 });
+
+// ============================================================
+// Cursor opened on the threadpool (#12)
+// ============================================================
+describe("Async cursor open (#12)", () => {
+  let db;
+
+  before(async () => {
+    db = await Database.open(":memory:");
+    await db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)");
+    const rows = [];
+    for (let i = 1; i <= 1000; i++) rows.push([i, i % 7]);
+    db.executeBatchSync("INSERT INTO t VALUES ($1, $2)", rows);
+  });
+
+  after(async () => {
+    await db.close();
+  });
+
+  it("should open the cursor off the main thread and resolve to it", async () => {
+    let ticked = false;
+    setImmediate(() => (ticked = true));
+    const cursor = await db.iterateRawAsync(
+      "SELECT v, COUNT(*) AS n FROM t WHERE id > :min GROUP BY v ORDER BY v",
+      { min: 500 },
+    );
+    assert.ok(ticked, "the event loop turned while the query started");
+    assert.deepEqual(cursor.columns, ["v", "n"]);
+    const rows = [];
+    for await (const row of cursor) rows.push(row);
+    assert.equal(rows.length, 7);
+    assert.equal(rows.reduce((s, [, n]) => s + n, 0), 500);
+
+    const objects = await db.iterateAsync("SELECT id FROM t ORDER BY id DESC LIMIT $1", [2]);
+    assert.deepEqual([...objects], [{ id: 1000 }, { id: 999 }]);
+    const all = await db.iterateAsync("SELECT COUNT(*) AS n FROM t");
+    assert.deepEqual([...all], [{ n: 1000 }]);
+  });
+
+  it("should reject when the query cannot start", async () => {
+    await assert.rejects(db.iterateAsync("SELECT * FROM nope"), /nope/);
+    await assert.rejects(db.iterateRawAsync("SELECT id FROM t WHERE id = $1 AND v = $2", [1]), /param/i);
+  });
+
+  it("should join the statement's queue of async calls", async () => {
+    const stmt = db.prepare("SELECT id FROM t WHERE v = :v ORDER BY id LIMIT 3");
+    const [cursor, rows, raw] = await Promise.all([
+      stmt.iterateRawAsync({ v: 1 }),
+      stmt.query({ v: 2 }),
+      stmt.iterateAsync([3]),
+    ]);
+    assert.deepEqual([...cursor], [[1], [8], [15]]);
+    assert.deepEqual(rows.map((r) => r.id), [2, 9, 16]);
+    assert.deepEqual([...raw].map((r) => r.id), [3, 10, 17]);
+    stmt.finalize();
+    await assert.rejects(stmt.iterateAsync([1]), /finalized/);
+  });
+
+  it("should close a cursor whose open was in flight when the transaction ended", async () => {
+    const tx = await db.begin();
+    const inTx = await tx.iterateAsync("SELECT id FROM t WHERE id <= $1 ORDER BY id", [2]);
+    assert.deepEqual([...inTx], [{ id: 1 }, { id: 2 }]);
+
+    const opening = tx.iterateRawAsync("SELECT id FROM t ORDER BY id");
+    const committing = tx.commit();
+    const cursor = await opening;
+    await committing;
+    assert.ok(cursor.closed);
+    assert.deepEqual([...cursor], []);
+    await assert.rejects(tx.iterateAsync("SELECT 1"), /closed/);
+  });
+
+  it("should let the database close only after an in-flight open lands", async () => {
+    const other = await Database.open(":memory:");
+    await other.exec("CREATE TABLE u (id INTEGER PRIMARY KEY)");
+    await other.execute("INSERT INTO u VALUES (1), (2), (3)");
+    const opening = other.iterateRawAsync("SELECT id FROM u ORDER BY id DESC");
+    await other.close();
+    const cursor = await opening;
+    assert.ok(cursor.closed);
+    await assert.rejects(other.iterateAsync("SELECT 1"), /closed/);
+  });
+});

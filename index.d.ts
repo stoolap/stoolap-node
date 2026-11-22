@@ -111,6 +111,14 @@ export declare class Database {
    * names the columns, so duplicate names are kept apart.
    */
   iterateRaw(sql: string, params?: any[] | Record<string, any>): RowCursor<any[]>;
+  /**
+   * `iterate` with the query started on the threadpool, so the work before
+   * the first row (a sort, a group, a join) does not block the event loop.
+   * Resolves to the cursor.
+   */
+  iterateAsync(sql: string, params?: any[] | Record<string, any>): Promise<RowCursor>;
+  /** `iterateRaw` with the query started on the threadpool; see `iterateAsync`. */
+  iterateRawAsync(sql: string, params?: any[] | Record<string, any>): Promise<RowCursor<any[]>>;
   /** Close the database synchronously. */
   closeSync(): void;
 }
@@ -172,6 +180,10 @@ export declare class PreparedStatement {
   iterate(params?: any[] | Record<string, any>): RowCursor;
   /** Rows as arrays with `cursor.columns`; see `Database.iterateRaw`. */
   iterateRaw(params?: any[] | Record<string, any>): RowCursor<any[]>;
+  /** Cursor opened on the threadpool, in the statement's queue; see `Database.iterateAsync`. */
+  iterateAsync(params?: any[] | Record<string, any>): Promise<RowCursor>;
+  /** Raw cursor opened on the threadpool; see `Database.iterateAsync`. */
+  iterateRawAsync(params?: any[] | Record<string, any>): Promise<RowCursor<any[]>>;
   /** Get the SQL text of this prepared statement. */
   get sql(): string;
   /** Release the prepared statement. */
@@ -238,6 +250,10 @@ export declare class Transaction {
   iterate(sql: string, params?: any[] | Record<string, any>): RowCursor;
   /** Rows as arrays with `cursor.columns`; see `Database.iterateRaw`. */
   iterateRaw(sql: string, params?: any[] | Record<string, any>): RowCursor<any[]>;
+  /** Cursor opened on the threadpool, in the transaction's queue; see `Database.iterateAsync`. */
+  iterateAsync(sql: string, params?: any[] | Record<string, any>): Promise<RowCursor>;
+  /** Raw cursor opened on the threadpool; see `Database.iterateAsync`. */
+  iterateRawAsync(sql: string, params?: any[] | Record<string, any>): Promise<RowCursor<any[]>>;
   /** Rollback the transaction synchronously. */
   rollbackSync(): void;
 }
