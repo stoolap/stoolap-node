@@ -25,7 +25,7 @@
     "@stoolap/lib-win32-x64-msvc": "0.5.1"
   },
   "devDependencies": {
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^13.2.0",
     "node-gyp": "^11.2.0"
   },
   "engines": {

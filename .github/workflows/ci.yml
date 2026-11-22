@@ -122,7 +122,11 @@ jobs:
           path: .
 
       - name: Install dependencies and build C addon
-        run: npm install --omit=optional
+        # --ignore-scripts: better-sqlite3 (benchmark only) has no prebuilt
+        # binary for Node 18 and does not build there; the addon is built below
+        run: |
+          npm install --omit=optional --ignore-scripts
+          npm run build
 
       - name: Run tests
         run: npm test
